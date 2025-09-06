@@ -1,0 +1,4 @@
+FROM golang:1.20-bullseye
+WORKDIR /app
+COPY . .
+CMD ["sh", "-c", "echo \"$CODE\" > main.go && go build -o main main.go && ./main"]
