@@ -1,6 +1,7 @@
 use crate::models::request::ExecutionRequest;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionTask {
     pub id: String,
     pub requests: Vec<ExecutionRequest>,
@@ -8,7 +9,7 @@ pub struct ExecutionTask {
     pub user_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExecutionType {
     Single,
     Parallel,

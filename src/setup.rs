@@ -15,22 +15,24 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
     dotenv::dotenv().ok();
     
     let max_containers = env::var("MAX_CONCURRENT_CONTAINERS")
-        .unwrap_or_else(|_| "10".to_string())
+        .unwrap_or_else(|_| "500".to_string())
         .parse::<usize>()?;
     info!("MAX_CONCURRENT_CONTAINERS: {}", max_containers);
         
     let pool_size = env::var("CONTAINER_POOL_SIZE")
-        .unwrap_or_else(|_| "5".to_string())
+        .unwrap_or_else(|_| "50".to_string())
         .parse::<usize>()?;
     info!("CONTAINER_POOL_SIZE: {}", pool_size);
+
+    let redis_client = RedisClient::new()?;
 
     let docker = Docker::connect_with_local_defaults()?;
     let executor = Arc::new(new_executor(docker, max_containers));
     let (tx, _) = broadcast::channel::<ExecutionNotification>(1024);
     let tx = Arc::new(tx);
-    let queue_manager = Arc::new(QueueManager::new(executor.clone()));
+    let queue_manager = Arc::new(QueueManager::new(executor.clone(), redis_client.clone()));
 
-    start_task_processor(executor.clone(), tx.clone(), queue_manager.clone());
+    start_task_processor(executor.clone(), tx.clone(), queue_manager.clone(), redis_client);
     
     let languages = vec![
         ("python".to_string(), "3.9".to_string()),
@@ -49,7 +51,7 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
     Ok((executor, tx, queue_manager))
 }
 
-fn start_task_processor(executor: Arc<CodeExecutor>, tx: Arc<broadcast::Sender<ExecutionNotification>>, queue_manager: Arc<QueueManager>) {
+fn start_task_processor(executor: Arc<CodeExecutor>, tx: Arc<broadcast::Sender<ExecutionNotification>>, queue_manager: Arc<QueueManager>, redis_client: RedisClient) {
     let languages = vec![
         ("python".to_string(), "3.9".to_string()),
         ("pypy".to_string(), "3.9".to_string()),
@@ -66,10 +68,10 @@ fn start_task_processor(executor: Arc<CodeExecutor>, tx: Arc<broadcast::Sender<E
         let queue_manager_clone = queue_manager.clone();
         let language_clone = language.clone();
         let version_clone = version.clone();
+        let redis_client_clone = redis_client.clone();
 
         tokio::spawn(async move {
-            let redis_client = RedisClient::new().unwrap();
-            queue_manager_clone.start_worker(language_clone, version_clone, redis_client).await;
+            queue_manager_clone.start_worker(language_clone, version_clone, redis_client_clone).await;
         });
     }
 }

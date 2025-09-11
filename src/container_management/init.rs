@@ -11,8 +11,8 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         image: "python:3.9".to_string(),
         command_format: vec!["python".to_string(), "-c".to_string(), "{}".to_string()],
         resource_limits: ContainerResourceLimits {
-            memory: "192m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256, // Adjusted for balanced allocation
+            memory: "192m".to_string(),
+            cpu_shares: 256,
         },
         env: vec!["PYTHONUNBUFFERED=1".to_string()],
     });
@@ -21,8 +21,8 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         image: "pypy:3.9".to_string(),
         command_format: vec!["pypy".to_string(), "-c".to_string(), "{}".to_string()],
         resource_limits: ContainerResourceLimits {
-            memory: "192m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256, // Adjusted for balanced allocation
+            memory: "192m".to_string(),
+            cpu_shares: 256,
         },
         env: vec!["PYTHONUNBUFFERED=1".to_string()],
     });
@@ -35,8 +35,8 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
             "javac Main.java && java -Xmx512m Main".to_string(),
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "512m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256, // Adjusted for balanced allocation
+            memory: "512m".to_string(),
+            cpu_shares: 256,
         },
         env: vec![],
     });
@@ -49,8 +49,8 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
             "javac Main.java && java -Xmx512m Main".to_string(),
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "512m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256, // Adjusted for balanced allocation
+            memory: "512m".to_string(),
+            cpu_shares: 256,
         },
         env: vec![],
     });
@@ -63,8 +63,8 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
             "gcc -o main main.c && ./main".to_string(),
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "384m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256, // Adjusted for balanced allocation
+            memory: "384m".to_string(),
+            cpu_shares: 256,
         },
         env: vec![],
     });
@@ -77,25 +77,25 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
             "g++ -o main main.cpp && ./main".to_string(),
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "384m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256, // Adjusted for balanced allocation
+            memory: "384m".to_string(),
+            cpu_shares: 256,
         },
         env: vec![],
     });
 
     language_configs.insert("javascript".to_string(), LanguageConfig {
-        image: "node:18".to_string(), // Must match the image you built
+        image: "node:18".to_string(),
         command_format: vec!["node".to_string(), "main.js".to_string()],
         resource_limits: ContainerResourceLimits { 
-            memory: "192m".to_string(), // Reduced for better resource usage
-            cpu_shares: 256 // Adjusted for balanced allocation
+            memory: "192m".to_string(),
+            cpu_shares: 256
         },
         env: vec![],
     });
 
     CodeExecutor { 
         docker, 
-        semaphore: Arc::new(Semaphore::new(max_containers.min(5))),
+        semaphore: Arc::new(Semaphore::new(max_containers.min(500))), // Updated to use higher limit
         container_pool: Arc::new(Mutex::new(HashMap::new())),
         language_configs,
         task_queue: Arc::new(Mutex::new(Vec::new())),

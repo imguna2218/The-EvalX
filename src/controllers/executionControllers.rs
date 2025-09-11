@@ -1,17 +1,17 @@
 use axum::{
     extract::{State, Json},
 };
+use crate::types::index::{CodeExecutor, ExecutionNotification};
 use std::sync::Arc;
 use uuid::Uuid;
 use std::env;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use tokio::sync::broadcast;
-use crate::types::index::{CodeExecutor, ExecutionNotification, ExecutionTask, ExecutionTaskType};
+use crate::queue_management::{QueueManager, ExecutionType, ExecutionTask};
 use crate::models::request::ExecutionRequest;
 use crate::models::response::EvaluationResult;
 use crate::AppResponse;
 use crate::caching::redis_client::RedisClient;
-use crate::queue_management::{QueueManager, ExecutionType};
 use sha2::{Sha256, Digest};
 use hex::ToHex;
 
@@ -82,8 +82,9 @@ pub async fn handle_execute(
     }
 }
 
+
 pub async fn handle_execute_parallel(
-    State((_executor, tx, redis_client, _queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
+    State((_executor, tx, redis_client, queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
     Json(requests): Json<Vec<ExecutionRequest>>,
 ) -> AppResponse<Vec<EvaluationResult>> {
     // Validate all requests
@@ -111,17 +112,14 @@ pub async fn handle_execute_parallel(
         result: None,
     });
 
-    let task = ExecutionTask {
-        id: execution_id.clone(),
-        requests: requests.clone(),
-        task_type: ExecutionTaskType::Parallel,
-        notification_tx: tx.clone(),
+    let results = match queue_manager.add_task(requests.clone(), ExecutionType::Parallel, 1, redis_client).await {
+        Ok(results) => results,
+        Err(e) => return AppResponse(Err(anyhow::anyhow!("Failed to add task: {}", e))),
     };
-
-    {
-        let mut queue = _executor.task_queue.lock().await;
-        queue.push(task);
-        _executor.task_notify.notify_one();
+    
+    if !results.is_empty() {
+        // Immediate execution occurred
+        return AppResponse(Ok(results));
     }
 
     let mut rx = tx.subscribe();
@@ -151,9 +149,10 @@ pub async fn handle_execute_parallel(
     }
 }
 
+
 pub async fn handle_execute_batch(
     State((_executor, tx, redis_client, queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
-    Json(requests): Json<Vec<ExecutionRequest>>,
+    Json(mut requests): Json<Vec<ExecutionRequest>>,
 ) -> AppResponse<Vec<EvaluationResult>> {
     // Validate all requests
     for request in &requests {
@@ -171,29 +170,51 @@ pub async fn handle_execute_batch(
         return AppResponse(Err(anyhow::anyhow!("Batch request list cannot be empty")));
     }
 
+    // Use the first request as template
+    let first_request = requests[0].clone();
+    let base_language = first_request.language.trim().to_string();
+    let base_version = first_request.version.trim().to_string();
+    let base_code = first_request.code.trim().to_string();
+
     // Validate the first request
-    let first_request = &requests[0];
-    if first_request.language.trim().is_empty() {
+    if base_language.is_empty() {
         return AppResponse(Err(anyhow::anyhow!(
             "The first request in a batch must contain a non-empty language"
         )));
     }
-    if first_request.version.trim().is_empty() {
+    if base_version.is_empty() {
         return AppResponse(Err(anyhow::anyhow!(
             "The first request in a batch must contain a non-empty version"
         )));
     }
-
-    // For all supported languages, ensure the first request has non-empty code
-    let is_supported_language = matches!(
-        first_request.language.as_str(),
-        "java" | "java11" | "c" | "cpp" | "python" | "javascript"
-    );
-    if is_supported_language && first_request.code.trim().is_empty() {
+    if base_code.is_empty() {
         return AppResponse(Err(anyhow::anyhow!(
-            "The first request in a batch for language '{}' must contain non-empty code",
-            first_request.language
+            "The first request in a batch must contain non-empty code"
         )));
+    }
+
+    // Enforce that all subsequent requests use the same language, version, code, timeout (stdin can differ)
+    for (i, req) in requests.iter_mut().enumerate().skip(1) {
+        if !req.language.trim().is_empty() && req.language.trim() != base_language {
+            warn!("Overriding language in request {} to match first request: '{}'", i + 1, base_language);
+            req.language = base_language.clone();
+        }
+        if !req.version.trim().is_empty() && req.version.trim() != base_version {
+            warn!("Overriding version in request {} to match first request: '{}'", i + 1, base_version);
+            req.version = base_version.clone();
+        }
+        if !req.code.trim().is_empty() && req.code.trim() != base_code {
+            warn!("Overriding code in request {} to match first request", i + 1);
+            req.code = base_code.clone();
+        }
+        if req.timeout.is_some() && req.timeout != first_request.timeout {
+            warn!("Overriding timeout in request {} to match first request", i + 1);
+            req.timeout = first_request.timeout;
+        }
+        if req.memory_limit.is_some() && req.memory_limit != first_request.memory_limit {
+            warn!("Overriding memory_limit in request {} to match first request", i + 1);
+            req.memory_limit = first_request.memory_limit.clone();
+        }
     }
 
     let execution_id = Uuid::new_v4().to_string();
