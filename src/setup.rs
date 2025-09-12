@@ -30,10 +30,8 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
     let executor = Arc::new(new_executor(docker, max_containers));
     let (tx, _) = broadcast::channel::<ExecutionNotification>(1024);
     let tx = Arc::new(tx);
-    let queue_manager = Arc::new(QueueManager::new(executor.clone(), redis_client.clone()));
+    let queue_manager = Arc::new(QueueManager::new(executor.clone(), redis_client.clone(), tx.clone()));
 
-    start_task_processor(executor.clone(), tx.clone(), queue_manager.clone(), redis_client);
-    
     let languages = vec![
         ("python".to_string(), "3.9".to_string()),
         ("pypy".to_string(), "3.9".to_string()),
@@ -45,8 +43,21 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
     ];
     
     info!("Pre-warming container pool...");
-    init_container_pool(&executor, languages, pool_size).await?;
-    info!("Container pool initialized");
+    let languages_pool = languages.clone();
+    init_container_pool(&executor, languages_pool, pool_size).await?;
+
+    for (language, version) in languages {
+        let _executor_clone = executor.clone();
+        let _tx_clone = tx.clone();
+        let queue_manager_clone = queue_manager.clone();
+        let language_clone = language.clone();
+        let version_clone = version.clone();
+        let redis_client_clone = redis_client.clone();
+
+        tokio::spawn(async move {
+            queue_manager_clone.start_worker(language_clone, version_clone, redis_client_clone).await;
+        });
+    }
 
     Ok((executor, tx, queue_manager))
 }

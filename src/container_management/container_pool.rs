@@ -101,41 +101,18 @@ pub async fn get_container(executor: &CodeExecutor, language: &str, version: &st
     Ok(None)
 }
 
-pub async fn return_container(executor: &CodeExecutor, language: &str, version: &str, container_id: String) {
-    let key = format!("{}:{}", language, version);
+pub async fn return_container(executor: &CodeExecutor, language: &str, version: &str, container_id: &str) {
+    let pool_key = format!("{}:{}", language, version);
     let mut pool = executor.container_pool.lock().await;
-    
-    if let Some(containers) = pool.get_mut(&key) {
-        let current_size_before = containers.len();
-        containers.push(container_id.clone());
+    if let Some(containers) = pool.get_mut(&pool_key) {
+        containers.push(container_id.to_string()); // Clone here for HashMap
         info!("Returned container {} to pool for {}:{}", container_id, language, version);
-        
-        // Check if we need to scale down the pool
-        let current_pool_size = containers.len();
-        let utilization = calculate_pool_utilization(current_pool_size);
-        
-        if utilization < DEFAULT_POOL_SCALE_DOWN_THRESHOLD && current_pool_size > DEFAULT_POOL_SCALE_FACTOR {
-            let containers_to_remove = current_pool_size - DEFAULT_POOL_SCALE_FACTOR;
-            if containers_to_remove > 0 {
-                let executor_clone = executor.clone();
-                let language_clone = language.to_string();
-                let version_clone = version.to_string();
-                
-                // Spawn background task to scale down pool
-                task::spawn(async move {
-                    if let Err(e) = scale_down_pool(&executor_clone, &language_clone, &version_clone, containers_to_remove).await {
-                        warn!("Failed to scale down pool for {}:{}: {}", language_clone, version_clone, e);
-                    }
-                });
-            }
-        }
     } else {
         let mut containers = Vec::new();
-        containers.push(container_id.clone());
-        pool.insert(key, containers);
+        containers.push(container_id.to_string()); // Clone here for HashMap
+        pool.insert(pool_key, containers);
         info!("Created new pool for {}:{} with container {}", language, version, container_id);
     }
-    
     executor.task_notify.notify_one(); // Notify queue when container is returned
 }
 

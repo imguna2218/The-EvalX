@@ -32,10 +32,10 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         command_format: vec![
             "sh".to_string(),
             "-c".to_string(),
-            "javac Main.java && java -Xmx512m Main".to_string(),
+            "javac Main.java && java -Xmx1024m -Xms512m Main".to_string(), // Increased memory
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "512m".to_string(),
+            memory: "1024m".to_string(), // Increased from 512m
             cpu_shares: 256,
         },
         env: vec![],
@@ -46,10 +46,10 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         command_format: vec![
             "sh".to_string(),
             "-c".to_string(),
-            "javac Main.java && java -Xmx512m Main".to_string(),
+            "javac Main.java && java -Xmx1024m -Xms512m Main".to_string(), // Increased memory
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "512m".to_string(),
+            memory: "1024m".to_string(), // Increased from 512m
             cpu_shares: 256,
         },
         env: vec![],

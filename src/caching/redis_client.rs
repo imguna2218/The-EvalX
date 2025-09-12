@@ -4,6 +4,7 @@ use std::env;
 use anyhow::Result;
 use sha2::{Sha256, Digest};
 use hex::ToHex;
+use crate::models::response::{Artifact, EvaluationResult};
 
 #[derive(Debug, Clone)]
 pub struct RedisClient {
@@ -27,8 +28,16 @@ impl RedisClient {
         let mut conn = self.client.get_connection()?;
         let value: Option<String> = conn.get(key)?;
         match value {
-            Some(val) => Ok(Some(serde_json::from_str(&val)?)),
-            None => Ok(None),
+            Some(val) => {
+                // Track cache hit
+                let _: () = conn.incr::<_, _, ()>("evalx:cache:hits", 1)?;
+                Ok(Some(serde_json::from_str(&val)?))
+            },
+            None => {
+                // Track cache miss
+                let _: () = conn.incr::<_, _, ()>("evalx:cache:misses", 1)?;
+                Ok(None)
+            },
         }
     }
 
@@ -51,18 +60,24 @@ impl RedisClient {
         Ok(())
     }
 
-    pub fn get_artifact(&mut self, key: &str) -> Result<Option<crate::models::response::Artifact>> {
+    pub fn get_artifact(&mut self, key: &str) -> Result<Option<Artifact>> {
         let mut conn = self.client.get_connection()?;
         let value: Option<String> = conn.get(key)?;
         match value {
-            Some(val) => Ok(Some(serde_json::from_str(&val)?)),
-            None => Ok(None),
+            Some(val) => {
+                let _: () = conn.incr::<_, _, ()>("evalx:cache:hits", 1)?;
+                Ok(Some(serde_json::from_str(&val)?))
+            },
+            None => {
+                let _: () = conn.incr::<_, _, ()>("evalx:cache:misses", 1)?;
+                Ok(None)
+            },
         }
     }
 
     pub fn set_artifact(&mut self, key: &str, code: &str, binary: &[u8], ttl_seconds: usize) -> Result<()> {
         let mut conn = self.client.get_connection()?;
-        let artifact = crate::models::response::Artifact {
+        let artifact = Artifact {
             code: code.to_string(),
             binary: binary.to_vec(),
         };
@@ -71,20 +86,65 @@ impl RedisClient {
         Ok(())
     }
 
-    // New: Batch-level caching methods
-    pub fn get_batch_from_cache(&mut self, code_hash: &str, test_hashes: &[String]) -> Result<Option<Vec<crate::models::response::EvaluationResult>>> {
-        let mut sorted_hashes = test_hashes.to_vec();
-        sorted_hashes.sort();
-        let batch_key = format!("evalx:batch:{}", Sha256::digest(sorted_hashes.join(":").as_bytes()).encode_hex::<String>());
-        let full_key = format!("{}:{}", code_hash, batch_key);
-        self.get_from_cache(&full_key)
+    // Batch-level caching methods
+    pub fn get_batch_from_cache(&mut self, code_hash: &str, test_hashes: &[String]) -> Result<Option<Vec<EvaluationResult>>> {
+        let mut conn = self.client.get_connection()?;
+        let batch_key = self.generate_batch_key(test_hashes);
+        let full_key = format!("evalx:batch:{}:{}", code_hash, batch_key);
+        
+        let value: Option<String> = conn.get(&full_key)?;
+        match value {
+            Some(val) => {
+                let _: () = conn.incr::<_, _, ()>("evalx:cache:hits", 1)?;
+                Ok(Some(serde_json::from_str(&val)?))
+            },
+            None => {
+                let _: () = conn.incr::<_, _, ()>("evalx:cache:misses", 1)?;
+                Ok(None)
+            },
+        }
     }
 
-    pub fn set_batch_in_cache(&mut self, code_hash: &str, test_hashes: &[String], results: &Vec<crate::models::response::EvaluationResult>, ttl_seconds: usize) -> Result<()> {
+    pub fn set_batch_in_cache(&mut self, code_hash: &str, test_hashes: &[String], results: &Vec<EvaluationResult>, ttl_seconds: usize) -> Result<()> {
+        let mut conn = self.client.get_connection()?;
+        let batch_key = self.generate_batch_key(test_hashes);
+        let full_key = format!("evalx:batch:{}:{}", code_hash, batch_key);
+        let serialized = serde_json::to_string(results)?;
+        conn.set_ex::<_, _, ()>(&full_key, serialized, ttl_seconds)?;
+        Ok(())
+    }
+
+    fn generate_batch_key(&self, test_hashes: &[String]) -> String {
         let mut sorted_hashes = test_hashes.to_vec();
         sorted_hashes.sort();
-        let batch_key = format!("evalx:batch:{}", Sha256::digest(sorted_hashes.join(":").as_bytes()).encode_hex::<String>());
-        let full_key = format!("{}:{}", code_hash, batch_key);
-        self.set_in_cache(&full_key, results, ttl_seconds)
+        Sha256::digest(sorted_hashes.join(":").as_bytes()).encode_hex::<String>()
+    }
+
+    // Cache statistics methods
+    pub fn get_cache_stats(&mut self) -> Result<(u64, u64)> {
+        let mut conn = self.client.get_connection()?;
+        let hits: u64 = conn.get("evalx:cache:hits").unwrap_or(0);
+        let misses: u64 = conn.get("evalx:cache:misses").unwrap_or(0);
+        Ok((hits, misses))
+    }
+
+    // Partial cache utilization - check if compilation artifact exists
+    pub fn get_compilation_artifact(&mut self, language: &str, version: &str, code: &str) -> Result<Option<Artifact>> {
+        let code_hash = Sha256::digest(code).encode_hex::<String>();
+        let artifact_key = format!("evalx:artifact:{}:{}:{}", language, version, code_hash);
+        self.get_artifact(&artifact_key)
+    }
+
+    // Async methods for hit/miss tracking (Phase 1 Step 4)
+    pub async fn increment_cache_hit(&self) -> Result<()> {
+        let mut conn = self.get_async_connection().await?;
+        conn.incr::<_, _, ()>("cache:hits", 1).await?;
+        Ok(())
+    }
+
+    pub async fn increment_cache_miss(&self) -> Result<()> {
+        let mut conn = self.get_async_connection().await?;
+        conn.incr::<_, _, ()>("cache:misses", 1).await?;
+        Ok(())
     }
 }

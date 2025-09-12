@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 use crate::queue_management::{ExecutionQueue, ExecutionTask, ExecutionType};
-use crate::types::index::CodeExecutor;
+use crate::types::index::{CodeExecutor, ExecutionNotification};
 use crate::caching::redis_client::RedisClient;
 use crate::models::request::ExecutionRequest;
 use crate::models::response::EvaluationResult;
@@ -11,6 +11,8 @@ use uuid::Uuid;
 use crate::container_management::container_pool::available_containers;
 use tracing::debug;
 use redis::AsyncCommands;
+use tracing::{info, error};
+use tokio::sync::broadcast;
 
 #[derive(Clone)]
 pub struct QueueManager {
@@ -18,15 +20,17 @@ pub struct QueueManager {
     tasks: Arc<RwLock<std::collections::HashMap<String, ExecutionTask>>>,
     executor: Arc<CodeExecutor>,
     redis_client: RedisClient,
+    notification_tx: Arc<broadcast::Sender<ExecutionNotification>>,
 }
 
 impl QueueManager {
-    pub fn new(executor: Arc<CodeExecutor>, redis_client: RedisClient) -> Self {
+    pub fn new(executor: Arc<CodeExecutor>, redis_client: RedisClient, notification_tx: Arc<broadcast::Sender<ExecutionNotification>>) -> Self {
         QueueManager {
             queue: ExecutionQueue::new(redis_client.clone()),
             tasks: Arc::new(RwLock::new(std::collections::HashMap::new())),
             executor,
             redis_client,
+            notification_tx,
         }
     }
 
@@ -34,141 +38,113 @@ impl QueueManager {
         &self,
         requests: Vec<ExecutionRequest>,
         execution_type: ExecutionType,
-        priority: u8,
+        priority: i64,
         redis_client: RedisClient,
-    ) -> Result<Vec<EvaluationResult>> {
+    ) -> Result<Vec<EvaluationResult>, anyhow::Error> {
+        if requests.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let first_request = &requests[0];
+        let language = first_request.language.as_ref().unwrap_or(&"".to_string()).trim().to_string();
+        let version = first_request.version.as_ref().unwrap_or(&"".to_string()).trim().to_string();
+
         let task_id = Uuid::new_v4().to_string();
-        let first_request = requests.first().cloned().ok_or_else(|| anyhow::anyhow!("Empty request list"))?;
-        let language = first_request.language.trim();
-        let version = first_request.version.trim();
-        let required_containers = match execution_type {
-            ExecutionType::Single => 1,
-            ExecutionType::Parallel => requests.len(),
-            ExecutionType::Batch => requests.len(),
+        let task = ExecutionTask {
+            id: task_id.clone(),
+            requests,
+            execution_type,
+            user_id: None,
         };
 
-        let available = available_containers(&self.executor, language, version).await?;
-        debug!(
-            "Task {}: Adding {} requests for {}:{} ({} of {} containers available)",
-            task_id, requests.len(), language, version, available, required_containers
-        );
-
-        // Check if queue is empty and containers are available for immediate execution
+        let serialized_task = serde_json::to_string(&task)?;
         let queue_key = format!("queue:{}:{}", language, version);
-        let mut conn = self.redis_client.get_async_connection().await?;
-        let queue_length: i64 = conn.llen(&queue_key).await?;
-        if available >= required_containers && queue_length == 0 {
-            debug!("Task {}: Executing immediately", task_id);
-            match execution_type {
-                ExecutionType::Single => {
-                    let result = self.executor.clone().execute(first_request, redis_client).await?;
-                    debug!("Task {}: Single execution completed", task_id);
-                    Ok(vec![result])
-                }
-                ExecutionType::Parallel => {
-                    let results = self.executor.clone().execute_parallel(requests, redis_client).await;
-                    debug!("Task {}: Parallel execution completed with {} results", task_id, results.len());
-                    Ok(results)
-                }
-                ExecutionType::Batch => {
-                    let results = self.executor.clone().execute_batch(requests, redis_client).await?;
-                    debug!("Task {}: Batch execution completed with {} results", task_id, results.len());
-                    Ok(results)
-                }
-            }
+        let priority_key = format!("priority:{}:{}", language, version);
+
+        let mut conn = redis_client.get_async_connection().await?;
+
+        // Add to priority set (score first, then member)
+        conn.zadd::<_, _, _, ()>(&priority_key, priority, &task_id).await?;
+
+        // Add to queue
+        conn.lpush::<_, _, ()>(&queue_key, &serialized_task).await?;
+
+        // Check if immediate execution is possible
+        let queue_length: i64 = conn.llen::<_, i64>(&queue_key).await?;
+        if queue_length == 1 {
+            // Queue was empty, execute immediately
+            let executor_clone = self.executor.clone();
+            let results = executor_clone.execute_batch(task.requests, redis_client).await?;
+            let _ = self.notify_completion(&task_id, &results);
+            Ok(results)
         } else {
-            debug!("Task {}: Enqueuing due to insufficient containers or non-empty queue", task_id);
-            let task = ExecutionTask {
-                id: task_id.clone(),
-                requests,
-                execution_type,
-                user_id: None,
-            };
-
-            // Store task in Redis and local map
-            let task_json = serde_json::to_string(&task)?;
-            let task_key = format!("task:{}", task_id);
-            conn.set_ex::<_, _, ()>(&task_key, task_json, 3600).await?; // Expire after 1 hour
-            {
-                let mut tasks = self.tasks.write().await;
-                tasks.insert(task_id.clone(), task);
-            }
-
-            // Enqueue task with priority
-            self.queue.enqueue(task_id.clone(), language, version, priority).await;
-            debug!("Task {}: Enqueued successfully", task_id);
+            // Enqueued, notify
+            let _ = self.notify_completion(&task_id, &vec![]);
             Ok(vec![])
         }
     }
 
-    pub async fn process_next(&self, language: &str, version: &str, redis_client: &mut RedisClient) -> Result<Vec<EvaluationResult>> {
-        if let Some(task_id) = self.queue.dequeue(language, version).await {
-            debug!("Dequeued task {} for {}:{}", task_id, language, version);
-            let task_key = format!("task:{}", task_id);
-            let mut conn = self.redis_client.get_async_connection().await?;
-            let task_json: Option<String> = conn.get(&task_key).await?;
-            let task: ExecutionTask = if let Some(json) = task_json {
-                serde_json::from_str(&json)?
-            } else {
-                debug!("Task {}: Not found in Redis", task_id);
-                return Err(anyhow::anyhow!("Task not found in Redis"));
+    pub async fn start_worker(&self, language: String, version: String, redis_client: RedisClient) {
+        info!("Starting worker for language: {}, version: {}", language, version);
+        let queue_key = format!("queue:{}:{}", language, version);
+        let priority_key = format!("priority:{}:{}", language, version);
+
+        loop {
+            let mut conn = match redis_client.get_async_connection().await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to get Redis connection: {}", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
             };
 
-            let results = match task.execution_type {
-                ExecutionType::Single => {
-                    if let Some(request) = task.requests.first() {
-                        let result = self.executor.clone().execute(request.clone(), redis_client.clone()).await?;
-                        debug!("Task {}: Single execution completed", task_id);
-                        vec![result]
-                    } else {
-                        debug!("Task {}: No requests found", task_id);
-                        vec![]
+            // Use BRPOP for blocking pop with 1-second timeout
+            let result: Option<(String, String)> = conn.brpop(&queue_key, 1).await.expect("Failed to dequeue task");
+            if let Some((_, task_id)) = result {
+                // Remove from priority set
+                conn.zrem::<_, _, ()>(&priority_key, &task_id).await.expect("Failed to remove task from priority set");
+                
+                // Get the task (assume stored under task_key during enqueue if needed; adjust if serialized directly in list)
+                let task_key = format!("task:{}", &task_id);
+                let serialized_task: Option<String> = conn.get(&task_key).await.expect("Failed to get task");
+                if let Some(serialized_task) = serialized_task {
+                    if let Ok(task) = serde_json::from_str::<ExecutionTask>(&serialized_task) {
+                        let executor_clone = self.executor.clone();
+                        match executor_clone.execute_batch(task.requests, redis_client.clone()).await {
+                            Ok(results) => {
+                                let _ = self.notify_completion(&task_id, &results);
+                            }
+                            Err(e) => {
+                                error!("Execution failed for task {}: {}", task_id, e);
+                                let _ = self.notify_completion(&task_id, &vec![]);
+                            }
+                        }
+                        // Clean up task
+                        let _: () = conn.del::<_, ()>(&task_key).await.expect("Failed to delete task");
                     }
                 }
-                ExecutionType::Parallel => {
-                    let results = self.executor.clone().execute_parallel(task.requests, redis_client.clone()).await;
-                    debug!("Task {}: Parallel execution completed with {} results", task_id, results.len());
-                    results
-                }
-                ExecutionType::Batch => {
-                    let results = self.executor.clone().execute_batch(task.requests, redis_client.clone()).await?;
-                    debug!("Task {}: Batch execution completed with {} results", task_id, results.len());
-                    results
-                }
-            };
-
-            // Clean up task from Redis and local map
-            conn.del::<_, ()>(&task_key).await?;
-            {
-                let mut tasks = self.tasks.write().await;
-                tasks.remove(&task_id);
-                debug!("Task {}: Removed from tasks map and Redis", task_id);
             }
-
-            Ok(results)
-        } else {
-            debug!("No tasks in queue for {}:{}", language, version);
-            Err(anyhow::anyhow!("No tasks in queue for {}:{}", language, version))
         }
     }
 
-    pub async fn start_worker(&self, language: String, version: String, redis_client: RedisClient) {
-        let redis_client = redis_client;
-        for _ in 0..32 { // Keep 32 workers as in original
-            let queue_manager = self.clone();
-            let language = language.clone();
-            let version = version.clone();
-            let mut redis_client = redis_client.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = queue_manager.process_next(&language, &version, &mut redis_client).await {
-                        debug!("Worker for {}:{}: No tasks or error: {}", language, version, e);
-                        // Use 1s polling with BRPOP
-                        sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            });
-        }
-        debug!("Started 32 workers for {}:{}", language, version);
+    pub async fn remove(&self, task_id: &str, language: &str, version: &str) {
+        let queue_key = format!("queue:{}:{}", language, version);
+        let priority_key = format!("priority:{}:{}", language, version);
+        let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
+        
+        // Remove from queue and priority set
+        conn.lrem::<_, _, ()>(&queue_key, 0, task_id).await.expect("Failed to remove task from queue");
+        conn.zrem::<_, _, ()>(&priority_key, task_id).await.expect("Failed to remove task from priority set");
+    }
+
+    // New method: Notify completion via broadcast (for Phase 1 notifications)
+    pub fn notify_completion(&self, task_id: &str, results: &Vec<EvaluationResult>) {
+        let notification = ExecutionNotification {
+            id: task_id.to_string(),
+            status: if results.is_empty() { "queued".to_string() } else { "completed".to_string() },
+            result: if results.is_empty() { None } else { Some(results[0].clone()) },  // Or aggregate
+        };
+        let _ = self.notification_tx.send(notification);
     }
 }
