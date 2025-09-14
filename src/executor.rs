@@ -255,6 +255,9 @@ impl CodeExecutor {
             "c" => "main.c", "cpp" => "main.cpp", "java" | "java11" => "Main.java",
             "python" => "main.py", "javascript" => "main.js", _ => "main",
         };
+        // SIMPLIFIED: `run_cmd` is now correct from the start because the config is fixed. No `mut` needed.
+        let run_cmd = language_config.command_format.clone();
+
 
         // --- 2. Asynchronous Batch Cache Check ---
         let code_hash = Sha256::digest(&base_code).encode_hex::<String>();
@@ -283,7 +286,6 @@ impl CodeExecutor {
         let artifact_key = format!("evalx:artifact:{}:{}:{}", &base_language, &base_version, &code_hash);
         let mut compile_time = 0.0;
         let mut compile_stderr: Vec<u8> = Vec::new();
-        let run_cmd = language_config.command_format.clone();
         
         let artifact_binary: Option<Arc<Vec<u8>>> = if is_compiled_language {
             if let Some(artifact) = redis_client.get_artifact_async(&artifact_key).await? {
@@ -293,7 +295,8 @@ impl CodeExecutor {
                 info!("Preparing to compile for language: {}, version: {}", base_language, base_version);
                 let temp_id = get_container(&self, &base_language, &base_version).await?.ok_or_else(|| anyhow!("No available container for compilation"))?;
                 
-                let (ct, _rc, cse) = match base_language.as_str() {
+                // SIMPLIFIED: We no longer need to capture the run command, so we discard it with `_`.
+                let (ct, _, cse) = match base_language.as_str() {
                     "c" => handle_c_artifact(&self, &temp_id, filename, &base_code, &artifact_key, &redis_client, memory_bytes).await?,
                     "cpp" => handle_cpp_artifact(&self, &temp_id, filename, &base_code, &artifact_key, &redis_client, memory_bytes).await?,
                     "java" | "java11" => handle_java_artifact(&self, &temp_id, filename, &base_code, &artifact_key, &redis_client, memory_bytes).await?,
@@ -302,6 +305,7 @@ impl CodeExecutor {
 
                 compile_time = ct;
                 compile_stderr = cse;
+                
                 return_container(&self, &base_language, &base_version, &temp_id).await;
 
                 if !compile_stderr.is_empty() {
@@ -340,7 +344,6 @@ impl CodeExecutor {
             let version_clone = base_version.clone();
             let code_clone = base_code.clone();
             let run_cmd_clone = run_cmd.clone();
-            let redis_client_clone = redis_client.clone();
             let filename_clone = filename.to_string();
             let artifact_binary_clone = artifact_binary.clone();
 
@@ -350,8 +353,6 @@ impl CodeExecutor {
 
                 if is_compiled_language {
                     if let Some(binary_data) = artifact_binary_clone {
-                        // **FIX:** The builder now creates its own buffer and we retrieve it with `into_inner()`.
-                        // This correctly transfers ownership and resolves the borrow checker error.
                         let mut builder = Builder::new(Vec::new());
                         let mut header = tar::Header::new_gnu();
                         let class_filename = if lang_clone.starts_with("java") { "Main.class" } else { "main" };

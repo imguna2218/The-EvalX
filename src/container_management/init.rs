@@ -27,41 +27,42 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec!["PYTHONUNBUFFERED=1".to_string()],
     });
 
+    // FIXED: command_format is now the run-only command
     language_configs.insert("java".to_string(), LanguageConfig {
         image: "java-slim-executor".to_string(),
         command_format: vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "javac Main.java && java -Xmx1024m -Xms512m Main".to_string(), // Increased memory
+            "java".to_string(),
+            "-Xmx1024m".to_string(),
+            "-Xms512m".to_string(),
+            "Main".to_string(),
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "1024m".to_string(), // Increased from 512m
+            memory: "1024m".to_string(),
             cpu_shares: 256,
         },
         env: vec![],
     });
 
+    // FIXED: command_format is now the run-only command
     language_configs.insert("java11".to_string(), LanguageConfig {
         image: "java11-slim-executor".to_string(),
         command_format: vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "javac Main.java && java -Xmx1024m -Xms512m Main".to_string(), // Increased memory
+            "java".to_string(),
+            "-Xmx1024m".to_string(),
+            "-Xms512m".to_string(),
+            "Main".to_string(),
         ],
         resource_limits: ContainerResourceLimits {
-            memory: "1024m".to_string(), // Increased from 512m
+            memory: "1024m".to_string(),
             cpu_shares: 256,
         },
         env: vec![],
     });
 
+    // FIXED: command_format is now the run-only command
     language_configs.insert("c".to_string(), LanguageConfig {
         image: "gcc-slim-executor".to_string(),
-        command_format: vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "gcc -o main main.c && ./main".to_string(),
-        ],
+        command_format: vec!["./main".to_string()],
         resource_limits: ContainerResourceLimits {
             memory: "384m".to_string(),
             cpu_shares: 256,
@@ -69,13 +70,10 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec![],
     });
 
+    // FIXED: command_format is now the run-only command
     language_configs.insert("cpp".to_string(), LanguageConfig {
         image: "gcc:11".to_string(),
-        command_format: vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "g++ -o main main.cpp && ./main".to_string(),
-        ],
+        command_format: vec!["./main".to_string()],
         resource_limits: ContainerResourceLimits {
             memory: "384m".to_string(),
             cpu_shares: 256,
@@ -95,7 +93,7 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
 
     CodeExecutor { 
         docker, 
-        semaphore: Arc::new(Semaphore::new(max_containers.min(500))), // Updated to use higher limit
+        semaphore: Arc::new(Semaphore::new(max_containers.min(500))),
         container_pool: Arc::new(Mutex::new(HashMap::new())),
         language_configs,
         task_queue: Arc::new(Mutex::new(Vec::new())),
