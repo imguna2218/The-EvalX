@@ -16,6 +16,21 @@ pub struct EvaluationResult {
     pub space_consumed: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SubmissionResponse {
+    pub token: String,
+    pub status: SubmissionStatus,
+    pub result: Option<EvaluationResult>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SubmissionStatus {
+    Queued,
+    Processing,
+    Completed,
+    Failed,
+}
+
 impl EvaluationResult {
     /// Creates a new error result with the given error message
     pub fn error_result(error: impl Into<String>) -> Self {

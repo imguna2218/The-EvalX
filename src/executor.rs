@@ -6,8 +6,6 @@ use futures_util::future::join_all;
 use futures_util::stream::StreamExt;
 use hex::ToHex;
 use sha2::{Digest, Sha256};
-use std::env;
-use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tar::Builder;
@@ -216,6 +214,7 @@ impl CodeExecutor {
         self: Arc<Self>,
         requests: Vec<ExecutionRequest>,
         redis_client: RedisClient,
+        token: Option<String>,
     ) -> Result<Vec<EvaluationResult>> {
         if requests.is_empty() {
             return Ok(vec![]);
@@ -298,6 +297,12 @@ impl CodeExecutor {
         if let Ok(Some(cached_results)) = redis_client.get_from_cache::<Vec<EvaluationResult>>(&full_batch_key) {
             debug!("Batch cache hit for key: {}", full_batch_key);
             redis_client.increment_cache_hit().await?;
+            if let Some(token) = token {
+                let result_key = format!("result:{}", token);
+                if let Ok(_) = redis_client.set_in_cache(&result_key, &cached_results, 3600) {
+                    debug!("Stored batch results for token: {}", token);
+                }
+            }
             return Ok(cached_results);
         }
         redis_client.increment_cache_miss().await?;
@@ -347,6 +352,12 @@ impl CodeExecutor {
                 space_consumed: format!("{:.2} MB", memory_bytes as f64 / (1024.0 * 1024.0)),
             };
             
+            if let Some(token) = token {
+                let result_key = format!("result:{}", token);
+                if let Ok(_) = redis_client.set_in_cache(&result_key, &vec![error_result.clone()], 3600) {
+                    debug!("Stored compilation error results for token: {}", token);
+                }
+            }
             return Ok(vec![error_result; requests.len()]);
         }
 
@@ -557,6 +568,14 @@ impl CodeExecutor {
             }
         }
 
+        // Store results in Redis with token key if provided
+        if let Some(token) = token {
+            let result_key = format!("result:{}", token);
+            if let Ok(_) = redis_client.set_in_cache(&result_key, &results, 3600) {
+                debug!("Stored batch results for token: {}", token);
+            }
+        }
+
         info!("Batch execution of {} requests completed in {:.2}s", results.len(), _start_time.elapsed().as_secs_f64());
         
         // Log cache statistics for monitoring
@@ -564,6 +583,12 @@ impl CodeExecutor {
             let total = hits + misses;
             let hit_rate = if total > 0 { (hits as f64 / total as f64) * 100.0 } else { 0.0 };
             info!("Cache statistics: {} hits, {} misses, {:.2}% hit rate", hits, misses, hit_rate);
+        }
+
+        // Cleanup temporary container if used
+        if !temp_container_id.is_empty() {
+            let _ = self.docker.remove_container(&temp_container_id, Some(RemoveContainerOptions { force: true, ..Default::default() })).await;
+            debug!("Cleaned up temporary compilation container: {}", temp_container_id);
         }
 
         Ok(results)

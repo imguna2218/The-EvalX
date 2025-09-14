@@ -1,4 +1,4 @@
-use axum::{routing::post, Router, routing::get};
+use axum::{routing::{post, get}, Router};
 use std::sync::Arc;
 use tower_http::cors::{CorsLayer, Any};
 use tower_http::trace::TraceLayer;
@@ -9,7 +9,7 @@ use tower_http::timeout::TimeoutLayer;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use crate::types::index::{CodeExecutor, ExecutionNotification};
-use crate::controllers::executionControllers::{handle_execute, handle_execute_parallel, handle_execute_batch};
+use crate::controllers::executionControllers::{handle_execute, handle_execute_parallel, handle_execute_batch, handle_submission_status};
 use crate::controllers::notificationControllers::handle_ws_upgrade;
 use crate::caching::redis_client::RedisClient;
 use crate::queue_management::QueueManager; 
@@ -41,6 +41,7 @@ pub fn create_router(
                         .layer(ConcurrencyLimitLayer::new(4)),
                 ),
         )
+        .route("/submissions/:token", get(handle_submission_status))
         .route("/ws", get(handle_ws_upgrade))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

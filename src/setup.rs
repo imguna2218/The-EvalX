@@ -55,6 +55,7 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
         let redis_client_clone = redis_client.clone();
 
         tokio::spawn(async move {
+            info!("Worker spawned for language: {}, version: {}", language_clone, version_clone);
             queue_manager_clone.start_worker(language_clone, version_clone, redis_client_clone).await;
         });
     }
@@ -82,6 +83,7 @@ fn start_task_processor(executor: Arc<CodeExecutor>, tx: Arc<broadcast::Sender<E
         let redis_client_clone = redis_client.clone();
 
         tokio::spawn(async move {
+            info!("Worker spawned for language: {}, version: {}", language_clone, version_clone);
             queue_manager_clone.start_worker(language_clone, version_clone, redis_client_clone).await;
         });
     }
