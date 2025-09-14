@@ -20,10 +20,12 @@ impl ExecutionQueue {
     pub async fn enqueue(&self, task_id: String, language: &str, version: &str, priority: u8) {
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
+        let task_key = format!("task:{}", &task_id);
         let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
         
-        // Add task to queue and priority set
+        // Add task to queue
         conn.lpush::<_, _, ()>(&queue_key, &task_id).await.expect("Failed to enqueue task");
+        // Add to priority set with proper score and member
         conn.zadd::<_, _, _, ()>(&priority_key, &task_id, priority as i64).await.expect("Failed to set priority");
     }
 
@@ -46,10 +48,12 @@ impl ExecutionQueue {
     pub async fn remove(&self, task_id: &str, language: &str, version: &str) {
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
+        let task_key = format!("task:{}", task_id);
         let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
         
-        // Remove from queue and priority set
+        // Remove from queue, priority set, and task storage
         conn.lrem::<_, _, ()>(&queue_key, 0, task_id).await.expect("Failed to remove task from queue");
         conn.zrem::<_, _, ()>(&priority_key, task_id).await.expect("Failed to remove task from priority set");
+        conn.del::<_, ()>(&task_key).await.expect("Failed to delete task");
     }
 }

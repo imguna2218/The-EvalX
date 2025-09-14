@@ -60,14 +60,18 @@ impl QueueManager {
         let serialized_task = serde_json::to_string(&task)?;
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
+        let task_key = format!("task:{}", &task_id);
 
         let mut conn = redis_client.get_async_connection().await?;
 
+        // Store the serialized task
+        conn.set::<_, _, ()>(&task_key, &serialized_task).await?;
+
         // Add to priority set (score first, then member)
-        conn.zadd::<_, _, _, ()>(&priority_key, priority, &task_id).await?;
+        conn.zadd::<_, _, _, ()>(&priority_key, &task_id, priority).await?;
 
         // Add to queue
-        conn.lpush::<_, _, ()>(&queue_key, &serialized_task).await?;
+        conn.lpush::<_, _, ()>(&queue_key, &task_id).await?;
 
         // Check if immediate execution is possible
         let queue_length: i64 = conn.llen::<_, i64>(&queue_key).await?;
@@ -76,6 +80,8 @@ impl QueueManager {
             let executor_clone = self.executor.clone();
             let results = executor_clone.execute_batch(task.requests, redis_client).await?;
             let _ = self.notify_completion(&task_id, &results);
+            // Clean up task
+            let _: () = conn.del::<_, ()>(&task_key).await?;
             Ok(results)
         } else {
             // Enqueued, notify
@@ -105,7 +111,7 @@ impl QueueManager {
                 // Remove from priority set
                 conn.zrem::<_, _, ()>(&priority_key, &task_id).await.expect("Failed to remove task from priority set");
                 
-                // Get the task (assume stored under task_key during enqueue if needed; adjust if serialized directly in list)
+                // Get the task
                 let task_key = format!("task:{}", &task_id);
                 let serialized_task: Option<String> = conn.get(&task_key).await.expect("Failed to get task");
                 if let Some(serialized_task) = serialized_task {
@@ -131,11 +137,13 @@ impl QueueManager {
     pub async fn remove(&self, task_id: &str, language: &str, version: &str) {
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
+        let task_key = format!("task:{}", task_id);
         let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
         
-        // Remove from queue and priority set
+        // Remove from queue, priority set, and task storage
         conn.lrem::<_, _, ()>(&queue_key, 0, task_id).await.expect("Failed to remove task from queue");
         conn.zrem::<_, _, ()>(&priority_key, task_id).await.expect("Failed to remove task from priority set");
+        conn.del::<_, ()>(&task_key).await.expect("Failed to delete task");
     }
 
     // New method: Notify completion via broadcast (for Phase 1 notifications)
