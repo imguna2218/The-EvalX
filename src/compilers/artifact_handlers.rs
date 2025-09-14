@@ -15,11 +15,12 @@ pub async fn handle_c_artifact(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &mut RedisClient,
+    redis_client: &RedisClient, // CHANGED: Not mutable
     memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    match redis_client.get_artifact(artifact_key) {
-        Ok(Some(artifact)) => {
+    // CHANGED: Use async Redis call
+    match redis_client.get_artifact_async(artifact_key).await? {
+        Some(artifact) => {
             debug!("Artifact cache hit for key: {}", artifact_key);
             let mut archive = Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
@@ -31,14 +32,15 @@ pub async fn handle_c_artifact(
             let tar_data = archive.into_inner()?;
             executor.docker.upload_to_container(
                 container_id,
-                Some(UploadToContainerOptions { path: "/app/", no_overwrite_dir_non_dir: "false" }),
+                Some(UploadToContainerOptions { path: "/app/", ..Default::default() }),
                 tar_data.into(),
             ).await?;
             Ok((0.0, vec!["./main".to_string()], Vec::new()))
         }
-        _ => {
+        None => {
             debug!("Artifact cache miss for key: {}, compiling", artifact_key);
-            compile_c(executor, container_id, filename, code, artifact_key, redis_client, memory_bytes).await
+            // Pass a mutable clone for the compilation function
+            compile_c(executor, container_id, filename, code, artifact_key, &mut redis_client.clone(), memory_bytes).await
         }
     }
 }
@@ -49,11 +51,12 @@ pub async fn handle_cpp_artifact(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &mut RedisClient,
+    redis_client: &RedisClient, // CHANGED: Not mutable
     memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    match redis_client.get_artifact(artifact_key) {
-        Ok(Some(artifact)) => {
+    // CHANGED: Use async Redis call
+    match redis_client.get_artifact_async(artifact_key).await? {
+        Some(artifact) => {
             debug!("Artifact cache hit for key: {}", artifact_key);
             let mut archive = Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
@@ -65,14 +68,14 @@ pub async fn handle_cpp_artifact(
             let tar_data = archive.into_inner()?;
             executor.docker.upload_to_container(
                 container_id,
-                Some(UploadToContainerOptions { path: "/app/", no_overwrite_dir_non_dir: "false" }),
+                Some(UploadToContainerOptions { path: "/app/", ..Default::default() }),
                 tar_data.into(),
             ).await?;
             Ok((0.0, vec!["./main".to_string()], Vec::new()))
         }
-        _ => {
+        None => {
             debug!("Artifact cache miss for key: {}, compiling", artifact_key);
-            compile_cpp(executor, container_id, filename, code, artifact_key, redis_client, memory_bytes).await
+            compile_cpp(executor, container_id, filename, code, artifact_key, &mut redis_client.clone(), memory_bytes).await
         }
     }
 }
@@ -83,11 +86,12 @@ pub async fn handle_java_artifact(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &mut RedisClient,
+    redis_client: &RedisClient, // CHANGED: Not mutable
     memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    match redis_client.get_artifact(artifact_key) {
-        Ok(Some(artifact)) => {
+    // CHANGED: Use async Redis call
+    match redis_client.get_artifact_async(artifact_key).await? {
+        Some(artifact) => {
             debug!("Artifact cache hit for key: {}", artifact_key);
             let mut archive = Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
@@ -99,24 +103,15 @@ pub async fn handle_java_artifact(
             let tar_data = archive.into_inner()?;
             executor.docker.upload_to_container(
                 container_id,
-                Some(UploadToContainerOptions { path: "/app/", no_overwrite_dir_non_dir: "false" }),
+                Some(UploadToContainerOptions { path: "/app/", ..Default::default() }),
                 tar_data.into(),
             ).await?;
-            let write_cmd = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("cat <<'EOF' > {}\n{}\nEOF", filename, code),
-            ];
-            let write_exec = executor.docker.create_exec(
-                container_id,
-                CreateExecOptions { cmd: Some(write_cmd), attach_stdout: Some(true), attach_stderr: Some(true), ..Default::default() },
-            ).await?;
-            timeout(Duration::from_secs(10), executor.docker.start_exec(&write_exec.id, None)).await??;
+            // REMOVED: Redundant source code writing on cache hit
             Ok((0.0, vec!["java".to_string(), "Main".to_string()], Vec::new()))
         }
-        _ => {
+        None => {
             debug!("Artifact cache miss for key: {}, compiling", artifact_key);
-            compile_java(executor, container_id, filename, code, artifact_key, redis_client, memory_bytes).await
+            compile_java(executor, container_id, filename, code, artifact_key, &mut redis_client.clone(), memory_bytes).await
         }
     }
 }

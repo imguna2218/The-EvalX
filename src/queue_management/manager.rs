@@ -37,9 +37,9 @@ impl QueueManager {
         execution_type: ExecutionType,
         priority: i64,
         redis_client: RedisClient,
-    ) -> Result<Vec<EvaluationResult>, anyhow::Error> {
+    ) -> Result<String, anyhow::Error> { // CHANGED: Return type is now Result<String, ...>
         if requests.is_empty() {
-            return Ok(vec![]);
+            return Err(anyhow::anyhow!("Request list cannot be empty"));
         }
 
         let first_request = &requests[0];
@@ -76,7 +76,7 @@ impl QueueManager {
         // Notify queued status
         let _ = self.notify_completion(&task_id, &vec![], SubmissionStatus::Queued);
 
-        Ok(vec![])
+        Ok(task_id) // CHANGED: Return the generated task_id
     }
 
     pub async fn start_worker(&self, language: String, version: String, redis_client: RedisClient) -> Result<(), anyhow::Error> {
@@ -105,11 +105,12 @@ impl QueueManager {
             };
 
             if let Some((_, task_id)) = result {
+                info!("Dequeued task: {}, language: {}, version: {}", task_id, language, version);
                 let status_key = format!("status:{}", &task_id);
                 // Remove from priority set
                 if let Err(e) = conn.zrem::<_, _, ()>(&priority_key, &task_id).await {
-                    error!("Failed to remove task from priority set: {}", e);
-                    conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed: {}", e));
+                    error!("Failed to remove task {} from priority set: {}", task_id, e);
+                    conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed for task {}: {}", task_id, e));
                     continue;
                 }
                 
@@ -118,18 +119,22 @@ impl QueueManager {
                 let serialized_task: Option<String> = match conn.get(&task_key).await {
                     Ok(res) => res,
                     Err(e) => {
-                        error!("Failed to get task: {}", e);
-                        conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed: {}", e));
+                        error!("Failed to get task {}: {}", task_id, e);
+                        conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed for task {}: {}", task_id, e));
                         continue;
                     }
                 };
 
                 if let Some(serialized_task) = serialized_task {
-                    let task: ExecutionTask = match serde_json::from_str(&serialized_task) {
-                        Ok(t) => t,
+                    info!("Deserializing task: {}, content: {}", task_id, serialized_task);
+                    let task: ExecutionTask = match serde_json::from_str::<ExecutionTask>(&serialized_task) {
+                        Ok(t) => {
+                            info!("Task {} type: {:?}", task_id, t.execution_type);
+                            t
+                        },
                         Err(e) => {
                             error!("Failed to deserialize task {}: {}", task_id, e);
-                            conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed: {}", e));
+                            conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed for task {}: {}", task_id, e));
                             let _ = self.notify_completion(&task_id, &vec![], SubmissionStatus::Failed);
                             continue;
                         }
@@ -137,7 +142,7 @@ impl QueueManager {
 
                     // Set status to Processing
                     if let Err(e) = conn.set::<_, _, ()>(&status_key, "processing").await {
-                        error!("Failed to set status to processing: {}", e);
+                        error!("Failed to set status to processing for task {}: {}", task_id, e);
                         continue;
                     }
 
@@ -152,7 +157,9 @@ impl QueueManager {
                             let serialized_results = serde_json::to_string(&results)?;
                             conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
                             // Set status to Completed
-                            conn.set::<_, _, ()>(&status_key, "completed").await.unwrap_or_else(|e| error!("Failed to set status to completed: {}", e));
+                            if let Err(e) = conn.set::<_, _, ()>(&status_key, "completed").await {
+                                error!("Failed to set status to completed for task {}: {}", task_id, e);
+                            }
                             let _ = self.notify_completion(&task_id, &results, SubmissionStatus::Completed);
                         }
                         Err(e) => {
@@ -161,7 +168,9 @@ impl QueueManager {
                             let serialized_results = serde_json::to_string(&error_result)?;
                             conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
                             // Set status to Failed
-                            conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed: {}", e));
+                            if let Err(e) = conn.set::<_, _, ()>(&status_key, "failed").await {
+                                error!("Failed to set status to failed for task {}: {}", task_id, e);
+                            }
                             let _ = self.notify_completion(&task_id, &error_result, SubmissionStatus::Failed);
                         }
                     }
@@ -171,7 +180,8 @@ impl QueueManager {
                         error!("Failed to delete task {}: {}", task_id, e);
                     }
                 } else {
-                    conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed: {}", e));
+                    error!("Task {} not found in Redis", task_id);
+                    conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed for task {}: {}", task_id, e));
                 }
             }
         }
@@ -206,4 +216,4 @@ impl QueueManager {
         };
         let _ = self.notification_tx.send(notification);
     }
-}
+}   

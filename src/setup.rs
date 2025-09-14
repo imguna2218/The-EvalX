@@ -3,7 +3,7 @@ use bollard::Docker;
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{info, error};
 
 use crate::types::index::{CodeExecutor, ExecutionNotification};
 use crate::container_management::container_pool::init_container_pool;
@@ -45,6 +45,7 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
     info!("Pre-warming container pool...");
     let languages_pool = languages.clone();
     init_container_pool(&executor, languages_pool, pool_size).await?;
+    info!("Container pool initialized for java11:11 with image java11-slim-executor");
 
     for (language, version) in languages {
         let _executor_clone = executor.clone();
@@ -56,7 +57,9 @@ pub async fn initialize_executor() -> Result<(Arc<CodeExecutor>, Arc<broadcast::
 
         tokio::spawn(async move {
             info!("Worker spawned for language: {}, version: {}", language_clone, version_clone);
-            queue_manager_clone.start_worker(language_clone, version_clone, redis_client_clone).await;
+            if let Err(e) = queue_manager_clone.start_worker(language_clone.clone(), version_clone.clone(), redis_client_clone).await {
+                error!("Worker failed for language: {}, version: {}: {}", language_clone, version_clone, e);
+            }
         });
     }
 
@@ -84,7 +87,9 @@ fn start_task_processor(executor: Arc<CodeExecutor>, tx: Arc<broadcast::Sender<E
 
         tokio::spawn(async move {
             info!("Worker spawned for language: {}, version: {}", language_clone, version_clone);
-            queue_manager_clone.start_worker(language_clone, version_clone, redis_client_clone).await;
+            if let Err(e) = queue_manager_clone.start_worker(language_clone.clone(), version_clone.clone(), redis_client_clone).await {
+                error!("Worker failed for language: {}, version: {}: {}", language_clone, version_clone, e);
+            }
         });
     }
 }

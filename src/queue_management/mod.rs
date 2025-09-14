@@ -1,5 +1,6 @@
 use crate::caching::redis_client::RedisClient;
 use redis::AsyncCommands;
+use tracing::info;
 
 pub mod task;
 pub mod manager;
@@ -17,17 +18,27 @@ impl ExecutionQueue {
         ExecutionQueue { redis_client }
     }
 
-    pub async fn enqueue(&self, task_id: String, language: &str, version: &str, priority: u8) {
+    pub async fn enqueue(&self, task_id: String, language: &str, version: &str, priority: u8, task: &ExecutionTask) {
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
         let task_key = format!("task:{}", &task_id);
         let status_key = format!("status:{}", &task_id);
         let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
         
+        // Serialize task and log
+        let serialized_task = serde_json::to_string(task).expect("Failed to serialize task");
+        info!("Enqueuing task {} for language: {}, version: {}, type: {:?}", task_id, language, version, task.execution_type);
+        info!("Serialized task content: {}", serialized_task);
+        
+        // Store serialized task
+        conn.set::<_, _, ()>(&task_key, &serialized_task).await.expect("Failed to store task");
+        
         // Add task to queue
         conn.lpush::<_, _, ()>(&queue_key, &task_id).await.expect("Failed to enqueue task");
+        
         // Add to priority set with proper score and member
         conn.zadd::<_, _, _, ()>(&priority_key, &task_id, priority as i64).await.expect("Failed to set priority");
+        
         // Set initial status to Queued
         conn.set::<_, _, ()>(&status_key, "queued").await.expect("Failed to set initial status");
     }

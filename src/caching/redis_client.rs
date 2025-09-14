@@ -24,17 +24,17 @@ impl RedisClient {
         self.client.get_async_connection().await.map_err(|e| anyhow::anyhow!("Failed to get async Redis connection: {}", e))
     }
 
+    // --- Synchronous Methods (Blocking) ---
+
     pub fn get_from_cache<T: for<'de> Deserialize<'de>>(&mut self, key: &str) -> Result<Option<T>> {
         let mut conn = self.client.get_connection()?;
         let value: Option<String> = conn.get(key)?;
         match value {
             Some(val) => {
-                // Track cache hit
                 let _: () = conn.incr::<_, _, ()>("evalx:cache:hits", 1)?;
                 Ok(Some(serde_json::from_str(&val)?))
             },
             None => {
-                // Track cache miss
                 let _: () = conn.incr::<_, _, ()>("evalx:cache:misses", 1)?;
                 Ok(None)
             },
@@ -45,18 +45,6 @@ impl RedisClient {
         let mut conn = self.client.get_connection()?;
         let serialized = serde_json::to_string(value)?;
         conn.set_ex::<_, _, ()>(key, serialized, ttl_seconds)?;
-        Ok(())
-    }
-
-    pub fn get_binary(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut conn = self.client.get_connection()?;
-        let value: Option<Vec<u8>> = conn.get(key)?;
-        Ok(value)
-    }
-
-    pub fn set_binary(&mut self, key: &str, value: &[u8], ttl_seconds: usize) -> Result<()> {
-        let mut conn = self.client.get_connection()?;
-        conn.set_ex::<_, _, ()>(key, value, ttl_seconds)?;
         Ok(())
     }
 
@@ -86,33 +74,71 @@ impl RedisClient {
         Ok(())
     }
 
-    // Batch-level caching methods
-    pub fn get_batch_from_cache(&mut self, code_hash: &str, test_hashes: &[String]) -> Result<Option<Vec<EvaluationResult>>> {
+    pub fn get_cache_stats(&mut self) -> Result<(u64, u64)> {
         let mut conn = self.client.get_connection()?;
-        let batch_key = self.generate_batch_key(test_hashes);
-        let full_key = format!("evalx:batch:{}:{}", code_hash, batch_key);
-        
-        let value: Option<String> = conn.get(&full_key)?;
+        let hits: u64 = conn.get("evalx:cache:hits").unwrap_or(0);
+        let misses: u64 = conn.get("evalx:cache:misses").unwrap_or(0);
+        Ok((hits, misses))
+    }
+    
+    // --- Asynchronous Methods (Non-Blocking) ---
+
+    pub async fn get_from_cache_async<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Result<Option<T>> {
+        let mut conn = self.get_async_connection().await?;
+        let value: Option<String> = conn.get(key).await?;
         match value {
             Some(val) => {
-                let _: () = conn.incr::<_, _, ()>("evalx:cache:hits", 1)?;
+                let _: () = conn.incr("evalx:cache:hits", 1).await?;
                 Ok(Some(serde_json::from_str(&val)?))
             },
             None => {
-                let _: () = conn.incr::<_, _, ()>("evalx:cache:misses", 1)?;
+                let _: () = conn.incr("evalx:cache:misses", 1).await?;
                 Ok(None)
             },
         }
     }
 
-    pub fn set_batch_in_cache(&mut self, code_hash: &str, test_hashes: &[String], results: &Vec<EvaluationResult>, ttl_seconds: usize) -> Result<()> {
-        let mut conn = self.client.get_connection()?;
-        let batch_key = self.generate_batch_key(test_hashes);
-        let full_key = format!("evalx:batch:{}:{}", code_hash, batch_key);
-        let serialized = serde_json::to_string(results)?;
-        conn.set_ex::<_, _, ()>(&full_key, serialized, ttl_seconds)?;
+    pub async fn set_in_cache_async<T: Serialize>(&self, key: &str, value: &T, ttl_seconds: usize) -> Result<()> {
+        let mut conn = self.get_async_connection().await?;
+        let serialized = serde_json::to_string(value)?;
+        conn.set_ex(key, serialized, ttl_seconds).await?;
         Ok(())
     }
+
+    pub async fn get_artifact_async(&self, key: &str) -> Result<Option<Artifact>> {
+        let mut conn = self.get_async_connection().await?;
+        let value: Option<String> = conn.get(key).await?;
+        match value {
+            Some(val) => {
+                let _: () = conn.incr("evalx:cache:hits", 1).await?;
+                Ok(Some(serde_json::from_str(&val)?))
+            },
+            None => {
+                let _: () = conn.incr("evalx:cache:misses", 1).await?;
+                Ok(None)
+            },
+        }
+    }
+
+    pub async fn set_artifact_async(&self, key: &str, code: &str, binary: &[u8], ttl_seconds: usize) -> Result<()> {
+        let mut conn = self.get_async_connection().await?;
+        let artifact = Artifact {
+            code: code.to_string(),
+            binary: binary.to_vec(),
+        };
+        let serialized = serde_json::to_string(&artifact)?;
+        conn.set_ex(key, serialized, ttl_seconds).await?;
+        Ok(())
+    }
+
+    pub async fn get_cache_stats_async(&self) -> Result<(u64, u64)> {
+        let mut conn = self.get_async_connection().await?;
+        let hits: u64 = conn.get("evalx:cache:hits").await.unwrap_or(0);
+        let misses: u64 = conn.get("evalx:cache:misses").await.unwrap_or(0);
+        Ok((hits, misses))
+    }
+
+    // --- Common and Existing Async Methods ---
 
     fn generate_batch_key(&self, test_hashes: &[String]) -> String {
         let mut sorted_hashes = test_hashes.to_vec();
@@ -120,22 +146,6 @@ impl RedisClient {
         Sha256::digest(sorted_hashes.join(":").as_bytes()).encode_hex::<String>()
     }
 
-    // Cache statistics methods
-    pub fn get_cache_stats(&mut self) -> Result<(u64, u64)> {
-        let mut conn = self.client.get_connection()?;
-        let hits: u64 = conn.get("evalx:cache:hits").unwrap_or(0);
-        let misses: u64 = conn.get("evalx:cache:misses").unwrap_or(0);
-        Ok((hits, misses))
-    }
-
-    // Partial cache utilization - check if compilation artifact exists
-    pub fn get_compilation_artifact(&mut self, language: &str, version: &str, code: &str) -> Result<Option<Artifact>> {
-        let code_hash = Sha256::digest(code).encode_hex::<String>();
-        let artifact_key = format!("evalx:artifact:{}:{}:{}", language, version, code_hash);
-        self.get_artifact(&artifact_key)
-    }
-
-    // Async methods for hit/miss tracking (Phase 1 Step 4)
     pub async fn increment_cache_hit(&self) -> Result<()> {
         let mut conn = self.get_async_connection().await?;
         conn.incr::<_, _, ()>("cache:hits", 1).await?;
