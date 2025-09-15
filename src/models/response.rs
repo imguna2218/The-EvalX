@@ -20,7 +20,8 @@ pub struct EvaluationResult {
 pub struct SubmissionResponse {
     pub token: String,
     pub status: SubmissionStatus,
-    pub result: Option<EvaluationResult>,
+    // CHANGED: This now holds a vector of results to support batches.
+    pub results: Option<Vec<EvaluationResult>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

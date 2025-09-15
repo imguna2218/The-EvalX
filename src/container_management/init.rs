@@ -7,9 +7,10 @@ use crate::types::index::{CodeExecutor, LanguageConfig, ContainerResourceLimits}
 pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
     let mut language_configs = HashMap::new();
     
+    // FIXED: The command now executes the script file instead of a string.
     language_configs.insert("python".to_string(), LanguageConfig {
         image: "python:3.9".to_string(),
-        command_format: vec!["python".to_string(), "-c".to_string(), "{}".to_string()],
+        command_format: vec!["python".to_string(), "/app/main.py".to_string()],
         resource_limits: ContainerResourceLimits {
             memory: "192m".to_string(),
             cpu_shares: 256,
@@ -17,9 +18,10 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec!["PYTHONUNBUFFERED=1".to_string()],
     });
     
+    // FIXED: The command now executes the script file instead of a string.
     language_configs.insert("pypy".to_string(), LanguageConfig {
         image: "pypy:3.9".to_string(),
-        command_format: vec!["pypy".to_string(), "-c".to_string(), "{}".to_string()],
+        command_format: vec!["pypy".to_string(), "/app/main.py".to_string()],
         resource_limits: ContainerResourceLimits {
             memory: "192m".to_string(),
             cpu_shares: 256,
@@ -27,7 +29,6 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec!["PYTHONUNBUFFERED=1".to_string()],
     });
 
-    // FIXED: command_format is now the run-only command
     language_configs.insert("java".to_string(), LanguageConfig {
         image: "java-slim-executor".to_string(),
         command_format: vec![
@@ -43,7 +44,6 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec![],
     });
 
-    // FIXED: command_format is now the run-only command
     language_configs.insert("java11".to_string(), LanguageConfig {
         image: "java11-slim-executor".to_string(),
         command_format: vec![
@@ -59,7 +59,6 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec![],
     });
 
-    // FIXED: command_format is now the run-only command
     language_configs.insert("c".to_string(), LanguageConfig {
         image: "gcc-slim-executor".to_string(),
         command_format: vec!["./main".to_string()],
@@ -70,7 +69,6 @@ pub fn new_executor(docker: Docker, max_containers: usize) -> CodeExecutor {
         env: vec![],
     });
 
-    // FIXED: command_format is now the run-only command
     language_configs.insert("cpp".to_string(), LanguageConfig {
         image: "gcc:11".to_string(),
         command_format: vec!["./main".to_string()],

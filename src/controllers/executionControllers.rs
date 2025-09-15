@@ -27,7 +27,6 @@ pub async fn handle_execute(
         }
     }
     
-    // Check cache first before queueing
     let language = request.language.as_ref().unwrap_or(&"".to_string()).to_string();
     let version = request.version.as_ref().unwrap_or(&"".to_string()).to_string();
     let code = request.code.as_ref().unwrap_or(&"".to_string()).to_string();
@@ -44,24 +43,24 @@ pub async fn handle_execute(
     if let Ok(Some(cached_result)) = redis_client.get_from_cache_async(&cache_key).await {
         debug!("Cache hit for key: {}", cache_key);
         return AppResponse(Ok(SubmissionResponse {
-            token: "cached".to_string(), // No real token for a cached, synchronous-like response
+            token: "cached".to_string(),
             status: SubmissionStatus::Completed,
-            result: Some(cached_result),
+            // CHANGED: Wrap single result in a vector to match the new struct definition.
+            results: Some(vec![cached_result]),
         }));
     }
 
-    // If not cached, add to queue
     match queue_manager.add_task(vec![request.clone()], ExecutionType::Single, 1, redis_client).await {
-        Ok(task_id) => { // CHANGED: Capture the returned task_id
+        Ok(task_id) => {
             let _ = tx.send(ExecutionNotification {
                 id: task_id.clone(),
                 status: "queued".to_string(),
-                result: None,
+                results: None, // CHANGED: Field name
             });
             AppResponse(Ok(SubmissionResponse {
-                token: task_id, // CHANGED: Use the correct task_id as the token
+                token: task_id,
                 status: SubmissionStatus::Queued,
-                result: None,
+                results: None, // CHANGED: Field name
             }))
         }
         Err(e) => AppResponse(Err(anyhow!("Failed to add task: {}", e))),
@@ -72,7 +71,6 @@ pub async fn handle_execute_parallel(
     State((_executor, tx, redis_client, queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
     Json(requests): Json<Vec<ExecutionRequest>>,
 ) -> AppResponse<SubmissionResponse> {
-    // This function can be deprecated in favor of execute_batch, but we'll fix it too.
     if requests.is_empty() {
         return AppResponse(Err(anyhow!("Request list cannot be empty")));
     }
@@ -83,17 +81,17 @@ pub async fn handle_execute_parallel(
     }
     
     match queue_manager.add_task(requests.clone(), ExecutionType::Parallel, 1, redis_client).await {
-        Ok(task_id) => { // CHANGED: Capture the returned task_id
+        Ok(task_id) => {
             debug!("Queuing parallel task with ID: {}", task_id);
             let _ = tx.send(ExecutionNotification {
                 id: task_id.clone(),
                 status: "queued".to_string(),
-                result: None,
+                results: None, // CHANGED: Field name
             });
             AppResponse(Ok(SubmissionResponse {
-                token: task_id, // CHANGED: Use the correct task_id as the token
+                token: task_id,
                 status: SubmissionStatus::Queued,
-                result: None,
+                results: None, // CHANGED: Field name
             }))
         }
         Err(e) => AppResponse(Err(anyhow!("Failed to add task: {}", e))),
@@ -108,7 +106,6 @@ pub async fn handle_execute_batch(
         return AppResponse(Err(anyhow!("Batch request list cannot be empty")));
     }
 
-    // --- Validation logic remains the same ---
     let first_request = requests[0].clone();
     let base_language = first_request.language.as_ref().unwrap_or(&String::new()).trim().to_string();
     let base_version = first_request.version.as_ref().unwrap_or(&String::new()).trim().to_string();
@@ -127,7 +124,6 @@ pub async fn handle_execute_batch(
         req.timeout = req.timeout.or(first_request.timeout);
         normalized_requests.push(req);
     }
-    // --- End Validation Logic ---
     
     let max_requests = env::var("MAX_REQUESTS").unwrap_or_else(|_| "100".to_string()).parse::<usize>().unwrap();
     if normalized_requests.len() > max_requests {
@@ -135,17 +131,17 @@ pub async fn handle_execute_batch(
     }
     
     match queue_manager.add_task(normalized_requests.clone(), ExecutionType::Batch, 1, redis_client).await {
-        Ok(task_id) => { // CHANGED: Capture the returned task_id
+        Ok(task_id) => {
             info!("Validated and queued batch task with ID: {}", task_id);
             let _ = tx.send(ExecutionNotification {
                 id: task_id.clone(),
                 status: "queued".to_string(),
-                result: None,
+                results: None, // CHANGED: Field name
             });
             AppResponse(Ok(SubmissionResponse {
-                token: task_id, // CHANGED: Use the correct task_id as the token
+                token: task_id,
                 status: SubmissionStatus::Queued,
-                result: None,
+                results: None, // CHANGED: Field name
             }))
         }
         Err(e) => AppResponse(Err(anyhow!("Failed to add task: {}", e))),
@@ -159,25 +155,23 @@ pub async fn handle_submission_status(
     let result_key = format!("result:{}", token);
     let status_key = format!("status:{}", token);
     
-    // CHANGED: Use async redis calls
     match redis_client.get_from_cache_async::<Vec<EvaluationResult>>(&result_key).await {
         Ok(Some(results)) => {
             debug!("Found completed results for token: {}", token);
             AppResponse(Ok(SubmissionResponse {
                 token,
                 status: SubmissionStatus::Completed,
-                result: results.into_iter().next(), // Return the first result for single-result view
+                results: Some(results),
             }))
         }
         Ok(None) => {
-            // CHANGED: Use async redis calls
             match redis_client.get_from_cache_async::<String>(&status_key).await {
                 Ok(Some(status)) if status == "processing" => {
                     debug!("Task is processing for token: {}", token);
                     AppResponse(Ok(SubmissionResponse {
                         token,
                         status: SubmissionStatus::Processing,
-                        result: None,
+                        results: None, // CHANGED: Field name
                     }))
                 }
                 _ => {
@@ -185,7 +179,7 @@ pub async fn handle_submission_status(
                     AppResponse(Ok(SubmissionResponse {
                         token,
                         status: SubmissionStatus::Queued,
-                        result: None,
+                        results: None, // CHANGED: Field name
                     }))
                 }
             }

@@ -49,5 +49,6 @@ pub struct CodeExecutor {
 pub struct ExecutionNotification {
     pub id: String,
     pub status: String,
-    pub result: Option<EvaluationResult>,
+    // CHANGED: This now holds a vector of results for notifications.
+    pub results: Option<Vec<EvaluationResult>>,
 }
