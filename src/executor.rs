@@ -255,7 +255,6 @@ impl CodeExecutor {
             "c" => "main.c", "cpp" => "main.cpp", "java" | "java11" => "Main.java",
             "python" => "main.py", "javascript" => "main.js", _ => "main",
         };
-        // SIMPLIFIED: `run_cmd` is now correct from the start because the config is fixed. No `mut` needed.
         let run_cmd = language_config.command_format.clone();
 
 
@@ -295,7 +294,6 @@ impl CodeExecutor {
                 info!("Preparing to compile for language: {}, version: {}", base_language, base_version);
                 let temp_id = get_container(&self, &base_language, &base_version).await?.ok_or_else(|| anyhow!("No available container for compilation"))?;
                 
-                // SIMPLIFIED: We no longer need to capture the run command, so we discard it with `_`.
                 let (ct, _, cse) = match base_language.as_str() {
                     "c" => handle_c_artifact(&self, &temp_id, filename, &base_code, &artifact_key, &redis_client, memory_bytes).await?,
                     "cpp" => handle_cpp_artifact(&self, &temp_id, filename, &base_code, &artifact_key, &redis_client, memory_bytes).await?,
@@ -369,9 +367,22 @@ impl CodeExecutor {
                         return Err(anyhow!("Artifact binary was expected but not found"));
                     }
                 } else { 
-                    let write_cmd = vec!["sh".to_string(), "-c".to_string(), format!("echo '{}' > /app/{}", code_clone.replace("'", "'\\''"), filename_clone)];
-                    let write_exec = self_clone.docker.create_exec(&container_id, CreateExecOptions { cmd: Some(write_cmd), ..Default::default() }).await?;
-                    timeout(Duration::from_secs(5), self_clone.docker.start_exec(&write_exec.id, None)).await??;
+                    // **FIX:** Replaced the fragile `echo` command with the robust TAR upload method for interpreted languages.
+                    let mut builder = Builder::new(Vec::new());
+                    let mut header = tar::Header::new_gnu();
+                    header.set_path(&filename_clone)?;
+                    header.set_size(code_clone.as_bytes().len() as u64);
+                    header.set_mode(0o755); // Make script executable
+                    header.set_cksum();
+                    builder.append(&header, code_clone.as_bytes())?;
+                    builder.finish()?;
+                    let tar_data = builder.into_inner()?;
+
+                    self_clone.docker.upload_to_container(
+                        &container_id,
+                        Some(UploadToContainerOptions { path: "/app", ..Default::default() }),
+                        tar_data.into(),
+                    ).await?;
                 }
 
                 let run_start = Instant::now();
@@ -451,7 +462,6 @@ impl CodeExecutor {
 
         Ok(results)
     }
-    
 
     pub async fn cleanup(&self) -> Result<()> {
         let pool = self.container_pool.lock().await;
