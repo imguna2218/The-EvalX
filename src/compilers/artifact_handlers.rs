@@ -15,10 +15,9 @@ pub async fn handle_c_artifact(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &RedisClient, // CHANGED: Not mutable
+    redis_client: &RedisClient,
     memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    // CHANGED: Use async Redis call
     match redis_client.get_artifact_async(artifact_key).await? {
         Some(artifact) => {
             debug!("Artifact cache hit for key: {}", artifact_key);
@@ -39,8 +38,8 @@ pub async fn handle_c_artifact(
         }
         None => {
             debug!("Artifact cache miss for key: {}, compiling", artifact_key);
-            // Pass a mutable clone for the compilation function
-            compile_c(executor, container_id, filename, code, artifact_key, &mut redis_client.clone(), memory_bytes).await
+            // CHANGED: Simplified the call to pass a non-mutable reference.
+            compile_c(executor, container_id, filename, code, artifact_key, redis_client, memory_bytes).await
         }
     }
 }
@@ -51,10 +50,9 @@ pub async fn handle_cpp_artifact(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &RedisClient, // CHANGED: Not mutable
+    redis_client: &RedisClient,
     memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    // CHANGED: Use async Redis call
     match redis_client.get_artifact_async(artifact_key).await? {
         Some(artifact) => {
             debug!("Artifact cache hit for key: {}", artifact_key);
@@ -75,7 +73,8 @@ pub async fn handle_cpp_artifact(
         }
         None => {
             debug!("Artifact cache miss for key: {}, compiling", artifact_key);
-            compile_cpp(executor, container_id, filename, code, artifact_key, &mut redis_client.clone(), memory_bytes).await
+            // CHANGED: Simplified the call to pass a non-mutable reference.
+            compile_cpp(executor, container_id, filename, code, artifact_key, redis_client, memory_bytes).await
         }
     }
 }
@@ -86,10 +85,9 @@ pub async fn handle_java_artifact(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &RedisClient, // CHANGED: Not mutable
+    redis_client: &RedisClient,
     memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    // CHANGED: Use async Redis call
     match redis_client.get_artifact_async(artifact_key).await? {
         Some(artifact) => {
             debug!("Artifact cache hit for key: {}", artifact_key);
@@ -106,12 +104,12 @@ pub async fn handle_java_artifact(
                 Some(UploadToContainerOptions { path: "/app/", ..Default::default() }),
                 tar_data.into(),
             ).await?;
-            // REMOVED: Redundant source code writing on cache hit
             Ok((0.0, vec!["java".to_string(), "Main".to_string()], Vec::new()))
         }
         None => {
             debug!("Artifact cache miss for key: {}, compiling", artifact_key);
-            compile_java(executor, container_id, filename, code, artifact_key, &mut redis_client.clone(), memory_bytes).await
+            // CHANGED: Simplified the call to pass a non-mutable reference.
+            compile_java(executor, container_id, filename, code, artifact_key, redis_client, memory_bytes).await
         }
     }
 }
@@ -122,7 +120,6 @@ pub async fn handle_python_artifact(
     filename: &str,
     code: &str,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    // Write the Python code to main.py
     let write_cmd = vec![
         "sh".to_string(),
         "-c".to_string(),
@@ -137,7 +134,6 @@ pub async fn handle_python_artifact(
         Ok(Err(e)) => return Err(anyhow::anyhow!("Failed to write Python code: {}", e)),
         Err(_) => return Err(anyhow::anyhow!("Timeout writing Python code")),
     };
-    // Return command to execute the script directly
     Ok((0.0, vec!["python".to_string(), filename.to_string()], Vec::new()))
 }
 
@@ -147,7 +143,6 @@ pub async fn handle_javascript_artifact(
     filename: &str,
     code: &str,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
-    // Write the JavaScript code to main.js
     let write_cmd = vec![
         "sh".to_string(),
         "-c".to_string(),
@@ -162,7 +157,6 @@ pub async fn handle_javascript_artifact(
         Ok(Err(e)) => return Err(anyhow::anyhow!("Failed to write JavaScript code: {}", e)),
         Err(_) => return Err(anyhow::anyhow!("Timeout writing JavaScript code")),
     };
-    // Return command to execute the script directly
     Ok((0.0, vec!["node".to_string(), filename.to_string()], Vec::new()))
 }
 

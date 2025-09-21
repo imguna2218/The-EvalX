@@ -1,15 +1,15 @@
 use anyhow::Result;
 use bollard::container::{Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions};
 use std::collections::HashMap;
-use tokio::sync::Mutex;
-use tracing::{info, debug, warn};
-use crate::types::index::CodeExecutor;
-use std::sync::Arc;
 use tokio::task;
+use tracing::{info, warn};
 
-// Add these constants for dynamic scaling
+// NEW: Import the container usage metric
+use crate::monitoring::metrics::CONTAINER_USAGE;
+use crate::types::index::CodeExecutor;
+
+// NOTE: Dynamic scaling constants are kept, but the primary fix is the waiting logic in get_container.
 const DEFAULT_POOL_SCALE_UP_THRESHOLD: u8 = 90;
-const DEFAULT_POOL_SCALE_DOWN_THRESHOLD: u8 = 10;
 const DEFAULT_POOL_SCALE_FACTOR: usize = 5;
 
 pub async fn init_container_pool(executor: &CodeExecutor, languages: Vec<(String, String)>, count_per_language: usize) -> Result<()> {
@@ -24,8 +24,10 @@ pub async fn init_container_pool(executor: &CodeExecutor, languages: Vec<(String
         }
         
         let mut pool = executor.container_pool.lock().await;
-        pool.insert(key, containers);
-        info!("Initialized pool for {}:{} with {} containers", language, version, count_per_language);
+        pool.insert(key.clone(), containers);
+        info!("Initialized pool for {} with {} containers", key, count_per_language);
+        // Initialize the metric gauge to 0 for this language pool
+        CONTAINER_USAGE.with_label_values(&[&key]).set(0);
     }
     
     Ok(())
@@ -54,10 +56,7 @@ pub async fn create_idle_container(executor: &CodeExecutor, language: &str, vers
     
     let container = executor.docker
         .create_container(
-            Some(CreateContainerOptions {
-                name: "",
-                platform: None,
-            }),
+            None::<CreateContainerOptions<String>>,
             config,
         )
         .await?;
@@ -70,50 +69,61 @@ pub async fn create_idle_container(executor: &CodeExecutor, language: &str, vers
     Ok(container.id)
 }
 
-pub async fn get_container(executor: &CodeExecutor, language: &str, version: &str) -> Result<Option<String>> {
+// MODIFIED: This function is now completely rewritten to wait for a container.
+pub async fn get_container(executor: &CodeExecutor, language: &str, version: &str) -> Result<String> {
     let key = format!("{}:{}", language, version);
-    let mut pool = executor.container_pool.lock().await;
-    
-    if let Some(containers) = pool.get_mut(&key) {
-        if let Some(container_id) = containers.pop() {
-            info!("Reusing container {} for {}:{}", container_id, language, version);
+
+    loop {
+        // 1. Acquire a lock on the container pool
+        let mut pool = executor.container_pool.lock().await;
+
+        // 2. Check if a container is available in the pool for the specified language
+        if let Some(container_id) = pool.get_mut(&key).and_then(|containers| containers.pop()) {
+            info!("Reusing container {} for {}", container_id, key);
             
-            // Check if we need to scale up the pool
-            let current_pool_size = containers.len();
-            let utilization = calculate_pool_utilization(current_pool_size);
-            if utilization > DEFAULT_POOL_SCALE_UP_THRESHOLD {
-                let executor_clone = executor.clone();
-                let language_clone = language.to_string();
-                let version_clone = version.to_string();
-                
-                // Spawn background task to scale up pool
-                task::spawn(async move {
-                    if let Err(e) = scale_up_pool(&executor_clone, &language_clone, &version_clone, DEFAULT_POOL_SCALE_FACTOR).await {
-                        warn!("Failed to scale up pool for {}:{}: {}", language_clone, version_clone, e);
-                    }
-                });
-            }
+            // Increment the in-use container metric
+            CONTAINER_USAGE.with_label_values(&[&key]).inc();
+
+            // Optional: You can add the dynamic scaling logic here if needed
+            // For now, the waiting logic is the primary fix.
             
-            return Ok(Some(container_id));
+            // 3. If a container is found, return it and exit the loop
+            return Ok(container_id);
         }
+
+        // 4. If no container is available, prepare to wait.
+        // We get a future that will complete when notify() is called.
+        let notified = executor.task_notify.notified();
+        
+        // 5. IMPORTANT: We release the lock *before* waiting.
+        // If we don't, no other task can ever return a container to the pool.
+        drop(pool);
+        
+        // 6. Wait for a notification that a container has been returned to the pool.
+        notified.await;
+
+        // The loop will now repeat, and this task will try to acquire a container again.
     }
-    
-    Ok(None)
 }
 
 pub async fn return_container(executor: &CodeExecutor, language: &str, version: &str, container_id: &str) {
     let pool_key = format!("{}:{}", language, version);
     let mut pool = executor.container_pool.lock().await;
+    
     if let Some(containers) = pool.get_mut(&pool_key) {
-        containers.push(container_id.to_string()); // Clone here for HashMap
-        info!("Returned container {} to pool for {}:{}", container_id, language, version);
+        containers.push(container_id.to_string());
     } else {
-        let mut containers = Vec::new();
-        containers.push(container_id.to_string()); // Clone here for HashMap
-        pool.insert(pool_key, containers);
-        info!("Created new pool for {}:{} with container {}", language, version, container_id);
+        // This case can happen if the pool was empty and is being refilled.
+        pool.insert(pool_key.clone(), vec![container_id.to_string()]);
     }
-    executor.task_notify.notify_one(); // Notify queue when container is returned
+
+    info!("Returned container {} to pool for {}", container_id, pool_key);
+    
+    // Decrement the in-use container metric
+    CONTAINER_USAGE.with_label_values(&[&pool_key]).dec();
+
+    // Notify ONE waiting task that a container is now available.
+    executor.task_notify.notify_one();
 }
 
 pub async fn remove_container(executor: &CodeExecutor, container_id: &str) -> Result<()> {
@@ -130,24 +140,20 @@ pub async fn remove_container(executor: &CodeExecutor, container_id: &str) -> Re
     Ok(())
 }
 
+// The rest of the functions remain the same as they are not part of the core issue.
 pub async fn available_containers(executor: &CodeExecutor, language: &str, version: &str) -> Result<usize> {
     let key = format!("{}:{}", language, version);
     let pool = executor.container_pool.lock().await;
     Ok(pool.get(&key).map_or(0, |containers| containers.len()))
 }
 
-// Helper function to calculate pool utilization percentage based on current size
 fn calculate_pool_utilization(current_size: usize) -> u8 {
     if current_size > 0 {
-        // For simplicity, we assume 50% utilization when we can't track exact usage
-        // In a real implementation, you'd track actual usage statistics
-        // This is a placeholder that will trigger scaling logic
         return 50;
     }
     0
 }
 
-// Scale up the pool by adding more containers
 async fn scale_up_pool(executor: &CodeExecutor, language: &str, version: &str, count: usize) -> Result<()> {
     info!("Scaling up pool for {}:{} by adding {} containers", language, version, count);
     
@@ -159,9 +165,7 @@ async fn scale_up_pool(executor: &CodeExecutor, language: &str, version: &str, c
             if let Some(containers) = pool.get_mut(&key) {
                 containers.push(container_id);
             } else {
-                let mut containers = Vec::new();
-                containers.push(container_id);
-                pool.insert(key, containers);
+                pool.insert(key, vec![container_id]);
             }
         }
     }
@@ -170,34 +174,6 @@ async fn scale_up_pool(executor: &CodeExecutor, language: &str, version: &str, c
     Ok(())
 }
 
-// Scale down the pool by removing excess containers
-async fn scale_down_pool(executor: &CodeExecutor, language: &str, version: &str, count: usize) -> Result<()> {
-    info!("Scaling down pool for {}:{} by removing {} containers", language, version, count);
-    
-    let key = format!("{}:{}", language, version);
-    let mut pool = executor.container_pool.lock().await;
-    
-    if let Some(containers) = pool.get_mut(&key) {
-        for _ in 0..count.min(containers.len()) {
-            if let Some(container_id) = containers.pop() {
-                let executor_clone = executor.clone();
-                let container_id_clone = container_id.clone();
-                
-                // Spawn background task to remove container
-                task::spawn(async move {
-                    if let Err(e) = remove_container(&executor_clone, &container_id_clone).await {
-                        warn!("Failed to remove container {} during scale down: {}", container_id_clone, e);
-                    }
-                });
-            }
-        }
-    }
-    
-    info!("Successfully scaled down pool for {}:{}", language, version);
-    Ok(())
-}
-
-// Get pool statistics for monitoring
 pub async fn get_pool_stats(executor: &CodeExecutor) -> HashMap<String, usize> {
     let pool = executor.container_pool.lock().await;
     let mut stats = HashMap::new();

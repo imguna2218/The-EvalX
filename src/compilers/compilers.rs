@@ -12,7 +12,8 @@ pub async fn compile_c(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &mut RedisClient,
+    // CHANGED: Removed `mut` as async methods don't need it.
+    redis_client: &RedisClient,
     _memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
     let compile_start = Instant::now();
@@ -38,7 +39,8 @@ pub async fn compile_c(
         Ok((compile_start.elapsed().as_secs_f64(), vec![], compile_stderr))
     } else {
         let binary_data = executor.fetch_file_from_container(container_id, "/app/main").await?;
-        if let Err(e) = redis_client.set_artifact(artifact_key, code, &binary_data, 120) {
+        // CHANGED: Switched to the non-blocking async version of set_artifact.
+        if let Err(e) = redis_client.set_artifact_async(artifact_key, code, &binary_data, 120).await {
             warn!("Failed to cache artifact for key: {}: {}", artifact_key, e);
         } else {
             debug!("Cached artifact for key: {}, binary size: {}", artifact_key, binary_data.len());
@@ -53,7 +55,8 @@ pub async fn compile_cpp(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &mut RedisClient,
+    // CHANGED: Removed `mut` as async methods don't need it.
+    redis_client: &RedisClient,
     _memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
     let compile_start = Instant::now();
@@ -80,7 +83,8 @@ pub async fn compile_cpp(
         Ok((compile_start.elapsed().as_secs_f64(), vec![], compile_stderr))
     } else {
         let binary_data = executor.fetch_file_from_container(container_id, "/app/main").await?;
-        if let Err(e) = redis_client.set_artifact(artifact_key, code, &binary_data, 120) {
+        // CHANGED: Switched to the non-blocking async version of set_artifact.
+        if let Err(e) = redis_client.set_artifact_async(artifact_key, code, &binary_data, 120).await {
             warn!("Failed to cache artifact for key: {}: {}", artifact_key, e);
         } else {
             debug!("Cached artifact for key: {}, binary size: {}", artifact_key, binary_data.len());
@@ -95,7 +99,8 @@ pub async fn compile_java(
     filename: &str,
     code: &str,
     artifact_key: &str,
-    redis_client: &mut RedisClient,
+    // CHANGED: Removed `mut` as async methods don't need it.
+    redis_client: &RedisClient,
     _memory_bytes: i64,
 ) -> Result<(f64, Vec<String>, Vec<u8>)> {
     let compile_start = Instant::now();
@@ -122,7 +127,8 @@ pub async fn compile_java(
         Ok((compile_start.elapsed().as_secs_f64(), vec![], compile_stderr))
     } else {
         let class_data = executor.fetch_file_from_container(container_id, "/app/Main.class").await?;
-        if let Err(e) = redis_client.set_artifact(artifact_key, code, &class_data, 120) {
+        // CHANGED: Switched to the non-blocking async version of set_artifact.
+        if let Err(e) = redis_client.set_artifact_async(artifact_key, code, &class_data, 120).await {
             warn!("Failed to cache artifact for key: {}: {}", artifact_key, e);
         } else {
             debug!("Cached artifact for key: {}, binary size: {}", artifact_key, class_data.len());

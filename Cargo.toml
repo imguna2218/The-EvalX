@@ -29,3 +29,5 @@ sysinfo = "0.29"
 mobc = "0.8"
 mobc-redis = "0.8"
 async-trait = "0.1"
+prometheus = { version = "0.13", features = ["process"] }
+lazy_static = "1.4.0"
