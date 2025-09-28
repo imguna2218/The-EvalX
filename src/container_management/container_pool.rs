@@ -70,50 +70,67 @@ pub async fn create_idle_container(executor: &CodeExecutor, language: &str, vers
     Ok(container.id)
 }
 
+// MODIFIED: This function now creates containers on-demand if the pool is empty.
 pub async fn get_container(executor: &CodeExecutor, language: &str, version: &str) -> Result<Option<String>> {
     let key = format!("{}:{}", language, version);
-    let mut pool = executor.container_pool.lock().await;
-    
-    if let Some(containers) = pool.get_mut(&key) {
-        if let Some(container_id) = containers.pop() {
-            info!("Reusing container {} for {}:{}", container_id, language, version);
-            
-            // Check if we need to scale up the pool
-            let current_pool_size = containers.len();
-            let utilization = calculate_pool_utilization(current_pool_size);
-            if utilization > DEFAULT_POOL_SCALE_UP_THRESHOLD {
-                let executor_clone = executor.clone();
-                let language_clone = language.to_string();
-                let version_clone = version.to_string();
+
+    // --- First, try to get a container from the existing pool ---
+    // The lock is scoped so it's released before we potentially create a new container.
+    {
+        let mut pool = executor.container_pool.lock().await;
+        if let Some(containers) = pool.get_mut(&key) {
+            if let Some(container_id) = containers.pop() {
+                info!("Reusing container {} from pool for {}:{}", container_id, language, version);
+
+                // Dynamic scaling logic to refill the pool in the background
+                let current_pool_size = containers.len();
+                let utilization = calculate_pool_utilization(current_pool_size);
+                if utilization > DEFAULT_POOL_SCALE_UP_THRESHOLD {
+                    let executor_clone = executor.clone();
+                    let language_clone = language.to_string();
+                    let version_clone = version.to_string();
+                    
+                    task::spawn(async move {
+                        if let Err(e) = scale_up_pool(&executor_clone, &language_clone, &version_clone, DEFAULT_POOL_SCALE_FACTOR).await {
+                            warn!("Failed to scale up pool for {}:{}: {}", language_clone, version_clone, e);
+                        }
+                    });
+                }
                 
-                // Spawn background task to scale up pool
-                task::spawn(async move {
-                    if let Err(e) = scale_up_pool(&executor_clone, &language_clone, &version_clone, DEFAULT_POOL_SCALE_FACTOR).await {
-                        warn!("Failed to scale up pool for {}:{}: {}", language_clone, version_clone, e);
-                    }
-                });
+                return Ok(Some(container_id));
             }
-            
-            return Ok(Some(container_id));
+        }
+    } // Mutex lock is released here.
+
+    // --- If the pool was empty, create a new container "just-in-time" ---
+    info!("Pool for {}:{} is empty. Creating a new container on-demand.", language, version);
+    match create_idle_container(executor, language, version).await {
+        Ok(new_container_id) => {
+            info!("Created new on-demand container {} for {}:{}", &new_container_id, language, version);
+            Ok(Some(new_container_id))
+        }
+        Err(e) => {
+            warn!("Failed to create on-demand container for {}:{}: {}", language, version, e);
+            // Propagate the error so the executor knows creation failed.
+            Err(e)
         }
     }
-    
-    Ok(None)
 }
+
 
 pub async fn return_container(executor: &CodeExecutor, language: &str, version: &str, container_id: &str) {
     let pool_key = format!("{}:{}", language, version);
     let mut pool = executor.container_pool.lock().await;
     if let Some(containers) = pool.get_mut(&pool_key) {
-        containers.push(container_id.to_string()); // Clone here for HashMap
+        containers.push(container_id.to_string());
         info!("Returned container {} to pool for {}:{}", container_id, language, version);
     } else {
         let mut containers = Vec::new();
-        containers.push(container_id.to_string()); // Clone here for HashMap
+        containers.push(container_id.to_string());
         pool.insert(pool_key, containers);
         info!("Created new pool for {}:{} with container {}", language, version, container_id);
     }
-    executor.task_notify.notify_one(); // Notify queue when container is returned
+    executor.task_notify.notify_one();
 }
 
 pub async fn remove_container(executor: &CodeExecutor, container_id: &str) -> Result<()> {
@@ -139,8 +156,6 @@ pub async fn available_containers(executor: &CodeExecutor, language: &str, versi
 // Helper function to calculate pool utilization percentage based on current size
 fn calculate_pool_utilization(current_size: usize) -> u8 {
     if current_size > 0 {
-        // For simplicity, we assume 50% utilization when we can't track exact usage
-        // In a real implementation, you'd track actual usage statistics
         // This is a placeholder that will trigger scaling logic
         return 50;
     }
