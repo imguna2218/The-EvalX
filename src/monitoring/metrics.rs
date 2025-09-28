@@ -6,13 +6,13 @@ use prometheus::{
 
 lazy_static! {
     // --- Request Metrics ---
+    // UPDATED: Added a "status" label to track response codes.
     pub static ref HTTP_REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "http_requests_total",
         "Total number of HTTP requests made.",
-        &["method", "path"]
+        &["method", "path", "status"]
     ).unwrap();
-
-    // FIXED: The fourth argument is now the vector of buckets directly.
+    // This histogram tracks the latency of HTTP requests.
     pub static ref HTTP_REQUEST_DURATION_SECONDS: HistogramVec = register_histogram_vec!(
         "http_request_duration_seconds",
         "The HTTP request latencies in seconds.",

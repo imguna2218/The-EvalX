@@ -22,4 +22,9 @@ echo "Building C++ (GCC 11) Image..."
 docker build -f Docker/cpp/Dockerfile-cpp11 -t gcc:11 .
 if [ $? -ne 0 ]; then exit 1; fi
 
+# --- ADDED: Build step for Redis ---
+echo "Building Redis Image..."
+docker build -t evalx-redis -f Docker/redis/Dockerfile.redis .
+if [ $? -ne 0 ]; then exit 1; fi
+
 echo "All Docker images built successfully!"

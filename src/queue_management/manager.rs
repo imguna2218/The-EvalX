@@ -10,6 +10,8 @@ use uuid::Uuid;
 use tracing::{info, error};
 use redis::AsyncCommands;
 use tokio::sync::broadcast;
+// ADDED: Import the prometheus metric for queue depth.
+use crate::monitoring::metrics::QUEUE_DEPTH;
 
 #[derive(Clone)]
 pub struct QueueManager {
@@ -45,7 +47,6 @@ impl QueueManager {
         let first_request = &requests[0];
         let language = first_request.language.as_ref().unwrap_or(&"".to_string()).trim().to_string();
         let version = first_request.version.as_ref().unwrap_or(&"".to_string()).trim().to_string();
-
         let task_id = Uuid::new_v4().to_string();
         let task = ExecutionTask {
             id: task_id.clone(),
@@ -53,11 +54,13 @@ impl QueueManager {
             execution_type,
             user_id: None,
         };
-
         let serialized_task = serde_json::to_string(&task)?;
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
         let status_key = format!("status:{}", &task_id);
+
+        // ADDED: Increment the queue depth gauge for the specific language.
+        QUEUE_DEPTH.with_label_values(&[&format!("{}:{}", language, version)]).inc();
 
         let mut conn = redis_client.get_async_connection().await?;
 
@@ -74,7 +77,6 @@ impl QueueManager {
         info!("Starting worker for language: {}, version: {}", language, version);
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
-
         loop {
             let mut conn = match redis_client.get_async_connection().await {
                 Ok(c) => c,
@@ -84,7 +86,6 @@ impl QueueManager {
                     continue;
                 }
             };
-
             let result: Option<(String, String)> = match conn.brpop(&queue_key, 1).await {
                 Ok(res) => res,
                 Err(e) => {
@@ -93,8 +94,10 @@ impl QueueManager {
                     continue;
                 }
             };
-
             if let Some((_, task_id)) = result {
+                // ADDED: Decrement the queue depth gauge for the specific language.
+                QUEUE_DEPTH.with_label_values(&[&format!("{}:{}", language, version)]).dec();
+
                 info!("Dequeued task: {}, language: {}, version: {}", task_id, language, version);
                 let status_key = format!("status:{}", &task_id);
                 if let Err(e) = conn.zrem::<_, _, ()>(&priority_key, &task_id).await {
@@ -112,7 +115,6 @@ impl QueueManager {
                         continue;
                     }
                 };
-
                 if let Some(serialized_task) = serialized_task {
                     let task: ExecutionTask = match serde_json::from_str::<ExecutionTask>(&serialized_task) {
                         Ok(t) => t,
@@ -123,13 +125,11 @@ impl QueueManager {
                             continue;
                         }
                     };
-
                     if let Err(e) = conn.set::<_, _, ()>(&status_key, "processing").await {
                         error!("Failed to set status to processing for task {}: {}", task_id, e);
                         continue;
                     }
                     self.notify_completion(&task_id, &vec![], SubmissionStatus::Processing);
-
                     let executor_clone = self.executor.clone();
                     let result_key = format!("result:{}", &task_id);
                     match executor_clone.execute_batch(task.requests, redis_client.clone(), Some(task_id.clone())).await {
@@ -173,7 +173,6 @@ impl QueueManager {
                 SubmissionStatus::Completed => "completed".to_string(),
                 SubmissionStatus::Failed => "failed".to_string(),
             },
-            // CHANGED: Send all results in the notification.
             results: if results.is_empty() { None } else { Some(results.clone()) },
         };
         let _ = self.notification_tx.send(notification);

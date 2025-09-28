@@ -1,4 +1,5 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use anyhow::anyhow;
 use bollard::container::{RemoveContainerOptions, StatsOptions, UploadToContainerOptions};
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use futures_util::future::join_all;
@@ -13,47 +14,38 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::caching::redis_client::RedisClient;
-use crate::compilers::artifact_handlers::{
-    handle_c_artifact, handle_cpp_artifact, handle_java_artifact,
-};
+use crate::compilers::artifact_handlers::{handle_c_artifact, handle_cpp_artifact, handle_java_artifact};
 use crate::container_management::container_pool::{get_container, return_container};
 use crate::models::request::ExecutionRequest;
 use crate::models::response::EvaluationResult;
 use crate::types::index::CodeExecutor;
 
 impl CodeExecutor {
-    // NOTE: This `execute` function is for single, non-batched requests.
-    // The primary logic for workers now uses `execute_batch`.
     pub async fn execute(
         self: Arc<Self>,
         request: ExecutionRequest,
         redis_client: RedisClient,
     ) -> Result<EvaluationResult> {
         let _permit = self.semaphore.acquire().await?;
-        let _start_time = Instant::now(); // Prefixed to suppress warning
+        let _start_time = Instant::now();  // Prefixed to suppress warning
 
-        // CHANGED: Replaced unsafe unwraps with safe error handling.
-        let language = request.language.ok_or_else(|| anyhow!("'language' field is required for execution"))?;
-        let version = request.version.ok_or_else(|| anyhow!("'version' field is required for execution"))?;
-        let code = request.code.ok_or_else(|| anyhow!("'code' field is required for execution"))?;
-        let language = language.trim().to_string();
-        let version = version.trim().to_string();
-        let code = code.trim().to_string();
+        let language = request.language.unwrap_or("".to_string()).trim().to_string();
+        let version = request.version.unwrap_or("".to_string()).trim().to_string();
+        let code = request.code.unwrap_or("".to_string()).trim().to_string();
 
         let is_compiled_language = matches!(language.as_str(), "java" | "java11" | "c" | "cpp");
 
-        let language_config = self
-            .language_configs
-            .get(&language)
-            .ok_or_else(|| anyhow!("Unsupported language: {}", language))?
-            .clone();
+        let language_config = self.language_configs.get(&language).ok_or_else(|| {
+            anyhow!("Unsupported language: {}", language)
+        })?.clone();
 
         let timeout_secs = request.timeout.unwrap_or(10) as f64;
         let timeout_duration = Duration::from_secs_f64(timeout_secs);
 
         let memory_limit = request.memory_limit.unwrap_or_else(|| "512m".to_string());
-        let memory_bytes = parse_memory_limit(&memory_limit)
-            .unwrap_or_else(|_| language_config.resource_limits.memory.parse::<i64>().unwrap_or(64 * 1024 * 1024));
+        let memory_bytes = parse_memory_limit(&memory_limit).unwrap_or(
+            language_config.resource_limits.memory.parse::<i64>().unwrap_or(64 * 1024 * 1024)
+        );
 
         let filename = match language.as_str() {
             "c" => "main.c",
@@ -66,51 +58,22 @@ impl CodeExecutor {
 
         let mut redis_client = redis_client;
         let (compile_time, run_cmd, compile_stderr, container_id) = if is_compiled_language {
-            let container_id = get_container(&self, &language, &version).await?;
-            let code_hash = Sha256::digest(code.as_bytes()).encode_hex::<String>();
+            let container_id = get_container(&self, &language, &version)
+                .await?
+                .ok_or_else(|| anyhow!("No available container for {}:{}", language, version))?;
+            let code_hash = Sha256::digest(&code).encode_hex::<String>();
             let artifact_key = format!("evalx:artifact:{}:{}:{}", &language, &version, &code_hash);
             let (compile_time, run_cmd, compile_stderr) = match language.as_str() {
-                "c" => {
-                    handle_c_artifact(
-                        &self,
-                        &container_id,
-                        filename,
-                        &code,
-                        &artifact_key,
-                        &redis_client,
-                        memory_bytes,
-                    )
-                    .await?
-                }
-                "cpp" => {
-                    handle_cpp_artifact(
-                        &self,
-                        &container_id,
-                        filename,
-                        &code,
-                        &artifact_key,
-                        &redis_client,
-                        memory_bytes,
-                    )
-                    .await?
-                }
-                "java" | "java11" => {
-                    handle_java_artifact(
-                        &self,
-                        &container_id,
-                        filename,
-                        &code,
-                        &artifact_key,
-                        &redis_client,
-                        memory_bytes,
-                    )
-                    .await?
-                }
+                "c" => handle_c_artifact(&self, &container_id, filename, &code, &artifact_key, &mut redis_client, memory_bytes).await?,
+                "cpp" => handle_cpp_artifact(&self, &container_id, filename, &code, &artifact_key, &mut redis_client, memory_bytes).await?,
+                "java" | "java11" => handle_java_artifact(&self, &container_id, filename, &code, &artifact_key, &mut redis_client, memory_bytes).await?,
                 _ => unreachable!(),
             };
             (compile_time, run_cmd, compile_stderr, container_id)
         } else {
-            let container_id = get_container(&self, &language, &version).await?;
+            let container_id = get_container(&self, &language, &version)
+                .await?
+                .ok_or_else(|| anyhow!("No available container for {}:{}", language, version))?;
             let run_cmd = match language.as_str() {
                 "python" => vec!["python".to_string(), "/app/main.py".to_string()],
                 "javascript" => vec!["node".to_string(), "/app/main.js".to_string()],
@@ -118,6 +81,8 @@ impl CodeExecutor {
             };
             (0.0, run_cmd, Vec::new(), container_id)
         };
+
+        let container_id_clone = container_id.clone();  // For logging after potential returns
 
         if !compile_stderr.is_empty() {
             let error_message = String::from_utf8_lossy(&compile_stderr).to_string();
@@ -137,119 +102,75 @@ impl CodeExecutor {
             &language,
             &version,
             timeout_secs,
-            Sha256::digest(code.as_bytes()).encode_hex::<String>(),
-            Sha256::digest(request.stdin.as_bytes()).encode_hex::<String>()
+            Sha256::digest(&code).encode_hex::<String>(),
+            Sha256::digest(&request.stdin).encode_hex::<String>()
         );
 
         if let Ok(Some(cached_result)) = redis_client.get_from_cache(&result_key) {
             debug!("Result cache hit for key: {}", result_key);
             return_container(&self, &language, &version, &container_id).await;
-            return Ok(EvaluationResult {
-                compile_time: if is_compiled_language {
-                    compile_time
-                } else {
-                    0.0
-                },
-                ..cached_result
-            });
+            return Ok(EvaluationResult { compile_time: if is_compiled_language { compile_time } else { 0.0 }, ..cached_result });
         }
 
         if !is_compiled_language {
             let write_cmd = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("echo '{}' > /app/{}", code.replace('\'', "'\\''"), filename),
+                format!("echo '{}' > /app/{}", code.replace("'", "'\\''"), filename),
             ];
-            let write_exec = self
-                .docker
-                .create_exec(
-                    &container_id,
-                    CreateExecOptions {
-                        cmd: Some(write_cmd),
-                        attach_stdout: Some(true),
-                        attach_stderr: Some(true),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            match timeout(
-                Duration::from_secs(1),
-                self.docker.start_exec(&write_exec.id, None),
-            )
-            .await
-            {
+            let write_exec = self.docker.create_exec(
+                &container_id,
+                CreateExecOptions { cmd: Some(write_cmd), attach_stdout: Some(true), attach_stderr: Some(true), ..Default::default() },
+            ).await?;
+            match timeout(Duration::from_secs(1), self.docker.start_exec(&write_exec.id, None)).await {
                 Ok(Ok(_)) => debug!("Code written to /app/{}", filename),
                 Ok(Err(e)) => {
                     return_container(&self, &language, &version, &container_id).await;
                     return Err(anyhow!("Failed to write code: {}", e));
-                }
+                },
                 Err(_) => {
                     return_container(&self, &language, &version, &container_id).await;
                     return Err(anyhow!("Timeout writing code"));
-                }
+                },
             };
         }
 
         let run_start = Instant::now();
+        let mut final_cmd = run_cmd.clone();
+
         debug!("Piping stdin for {}: '{}'", language, request.stdin);
-        let escaped_stdin = request.stdin.replace('\\', "\\\\").replace('$', "\\$").replace('`', "\\`").replace('\"', "\\\"").replace('\'', "'\\''");
-        let final_cmd = vec![
+        // Safe escaping for shell metachars
+        let escaped_stdin = request.stdin.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`").replace("\"", "\\\"").replace("'", "'\\''");
+        final_cmd = vec![
             "sh".to_string(),
             "-c".to_string(),
             format!("printf '%s' '{}' | {}", escaped_stdin, run_cmd.join(" ")),
         ];
 
         debug!("Executing command: {:?}", final_cmd);
-        let exec = self
-            .docker
-            .create_exec(
-                &container_id,
-                CreateExecOptions {
-                    cmd: Some(final_cmd),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let exec = self.docker.create_exec(
+            &container_id,
+            CreateExecOptions { cmd: Some(final_cmd), attach_stdout: Some(true), attach_stderr: Some(true), ..Default::default() },
+        ).await?;
 
         let (stdout, stderr_data, exit_code) = match timeout(timeout_duration, async {
             let exec_result = self.docker.start_exec(&exec.id, None).await?;
             let mut output = Vec::new();
             let mut stderr = Vec::new();
-            if let StartExecResults::Attached {
-                output: mut output_stream,
-                ..
-            } = exec_result
-            {
+            if let bollard::exec::StartExecResults::Attached { output: mut output_stream, .. } = exec_result {
                 while let Some(Ok(log)) = output_stream.next().await {
                     match log {
-                        bollard::container::LogOutput::StdOut { message } => {
-                            output.extend_from_slice(&message)
-                        }
-                        bollard::container::LogOutput::StdErr { message } => {
-                            stderr.extend_from_slice(&message)
-                        }
+                        bollard::container::LogOutput::StdOut { message } => output.extend_from_slice(&message),
+                        bollard::container::LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
                         _ => {}
                     }
                 }
             }
             let inspect = self.docker.inspect_exec(&exec.id).await?;
-            Ok::<_, anyhow::Error>((
-                String::from_utf8_lossy(&output).to_string(),
-                stderr,
-                inspect.exit_code.unwrap_or(-1),
-            ))
-        })
-        .await
-        {
+            Ok::<_, anyhow::Error>((String::from_utf8_lossy(&output).to_string(), stderr, inspect.exit_code.unwrap_or(-1) as i64))
+        }).await {
             Ok(Ok((stdout, stderr_data, exit_code))) => {
-                debug!(
-                    "Execution completed: stdout='{}', stderr='{}', exit_code={}",
-                    stdout,
-                    String::from_utf8_lossy(&stderr_data),
-                    exit_code
-                );
+                debug!("Execution completed: stdout='{}', stderr='{}', exit_code={}", stdout, String::from_utf8_lossy(&stderr_data), exit_code);
                 (stdout, stderr_data, exit_code)
             }
             Ok(Err(e)) => {
@@ -259,60 +180,28 @@ impl CodeExecutor {
             Err(_) => {
                 error!("Execution timed out");
                 return_container(&self, &language, &version, &container_id).await;
-                (
-                    "Time Limit Exceeded".to_string(),
-                    "Time Limit Exceeded".as_bytes().to_vec(),
-                    124,
-                )
+                ("Time Limit Exceeded".to_string(), "Time Limit Exceeded".as_bytes().to_vec(), 124)
             }
         };
-        let run_time = if exit_code == 124 {
-            timeout_secs
-        } else {
-            run_start.elapsed().as_secs_f64()
-        };
+        let run_time = if exit_code == 124 { timeout_secs } else { run_start.elapsed().as_secs_f64() };
 
-        let space_consumed = match self
-            .docker
-            .stats(
-                &container_id,
-                Some(StatsOptions {
-                    stream: false,
-                    one_shot: true,
-                }),
-            )
-            .next()
-            .await
-        {
-            Some(Ok(stats)) => format!(
-                "{:.2} MB",
-                stats.memory_stats.usage.unwrap_or(0) as f64 / (1024.0 * 1024.0)
-            ),
+        // Get stats BEFORE final return_container
+        let space_consumed = match self.docker.stats(&container_id, Some(StatsOptions { stream: false, one_shot: true })).next().await {
+            Some(Ok(stats)) => format!("{:.2} MB", stats.memory_stats.usage.unwrap_or(0) as f64 / (1024.0 * 1024.0)),
             _ => format!("{:.2} MB", memory_bytes as f64 / (1024.0 * 1024.0)),
         };
 
         let result = EvaluationResult {
-            compile_time: if is_compiled_language {
-                compile_time
-            } else {
-                0.0
-            },
+            compile_time: if is_compiled_language { compile_time } else { 0.0 },
             stdout,
-            stderr: if stderr_data.is_empty() {
-                None
-            } else {
-                Some(String::from_utf8_lossy(&stderr_data).to_string())
-            },
+            stderr: if stderr_data.is_empty() { None } else { Some(String::from_utf8_lossy(&stderr_data).to_string()) },
             exit_code,
             run_time,
             space_consumed,
         };
 
         if result.stderr.is_none() {
-            if redis_client
-                .set_in_cache(&result_key, &result, 3600)
-                .is_ok()
-            {
+            if let Ok(_) = redis_client.set_in_cache(&result_key, &result, 3600) {
                 debug!("Cached result for key: {}", result_key);
             }
         }
@@ -337,40 +226,40 @@ impl CodeExecutor {
         })?;
         let start_time = Instant::now();
 
+        // --- 1. Validation and Setup ---
         let first_request = &requests[0];
-        
-        // CHANGED: Replaced unsafe .unwrap() calls with safe error handling.
-        // This prevents the worker from panicking if a request is missing required fields.
-        let base_language = first_request.language.as_ref()
-            .ok_or_else(|| anyhow!("First request in batch must have a 'language'"))?
-            .trim().to_string();
-        let base_version = first_request.version.as_ref()
-            .ok_or_else(|| anyhow!("First request in batch must have a 'version'"))?
-            .trim().to_string();
-        let base_code = first_request.code.as_ref()
-            .ok_or_else(|| anyhow!("First request in batch must have 'code'"))?
-            .trim().to_string();
+        let base_language = first_request.language.as_ref().unwrap_or(&String::new()).trim().to_string();
+        let base_version = first_request.version.as_ref().unwrap_or(&String::new()).trim().to_string();
+        let base_code = first_request.code.as_ref().unwrap_or(&String::new()).trim().to_string();
 
-        info!(
-            "Executing batch for language: {}, version: {}, with {} requests",
-            base_language,
-            base_version,
-            requests.len()
-        );
+        info!("Executing batch for language: {}, version: {}, with {} requests", base_language, base_version, requests.len());
+
+        for (i, req) in requests.iter().enumerate() {
+            if req.language.as_ref().unwrap_or(&String::new()).trim() != base_language
+                || req.version.as_ref().unwrap_or(&String::new()).trim() != base_version
+                || req.code.as_ref().unwrap_or(&String::new()).trim() != base_code
+            {
+                return Err(anyhow!("Mismatched language/version/code in batch at index {}", i));
+            }
+        }
 
         let is_compiled_language = matches!(base_language.as_str(), "java" | "java11" | "c" | "cpp");
         let language_config = self.language_configs.get(&base_language).ok_or_else(|| anyhow!("Unsupported language: {}", base_language))?.clone();
         let timeout_secs = first_request.timeout.unwrap_or(10) as f64;
         let timeout_duration = Duration::from_secs_f64(timeout_secs);
         let memory_limit = first_request.memory_limit.as_ref().unwrap_or(&"512m".to_string()).clone();
-        let memory_bytes = parse_memory_limit(&memory_limit).unwrap_or_else(|_| language_config.resource_limits.memory.parse::<i64>().unwrap_or(64 * 1024 * 1024));
+        let memory_bytes = parse_memory_limit(&memory_limit).unwrap_or(
+            language_config.resource_limits.memory.parse::<i64>().unwrap_or(64 * 1024 * 1024)
+        );
         let filename = match base_language.as_str() {
             "c" => "main.c", "cpp" => "main.cpp", "java" | "java11" => "Main.java",
             "python" => "main.py", "javascript" => "main.js", _ => "main",
         };
         let run_cmd = language_config.command_format.clone();
 
-        let code_hash = Sha256::digest(base_code.as_bytes()).encode_hex::<String>();
+
+        // --- 2. Asynchronous Batch Cache Check ---
+        let code_hash = Sha256::digest(&base_code).encode_hex::<String>();
         let full_batch_key = {
             let test_hashes: Vec<String> = requests.iter().map(|req| Sha256::digest(req.stdin.as_bytes()).encode_hex::<String>()).collect();
             let mut hasher = Sha256::new();
@@ -381,7 +270,7 @@ impl CodeExecutor {
 
         if let Some(cached_results) = redis_client.get_from_cache_async::<Vec<EvaluationResult>>(&full_batch_key).await? {
             debug!("Batch cache hit for key: {}", full_batch_key);
-            let _ = redis_client.increment_cache_hit().await;
+            redis_client.increment_cache_hit().await?;
             if let Some(token) = token {
                 let result_key = format!("result:{}", token);
                 if let Err(e) = redis_client.set_in_cache_async(&result_key, &cached_results, 3600).await {
@@ -390,8 +279,9 @@ impl CodeExecutor {
             }
             return Ok(cached_results);
         }
-        let _ = redis_client.increment_cache_miss().await;
+        redis_client.increment_cache_miss().await?;
 
+        // --- 3. Compile Once (if needed) and Fetch Artifact Before Parallel Loop ---
         let artifact_key = format!("evalx:artifact:{}:{}:{}", &base_language, &base_version, &code_hash);
         let mut compile_time = 0.0;
         let mut compile_stderr: Vec<u8> = Vec::new();
@@ -402,7 +292,7 @@ impl CodeExecutor {
                 Some(Arc::new(artifact.binary))
             } else {
                 info!("Preparing to compile for language: {}, version: {}", base_language, base_version);
-                let temp_id = get_container(&self, &base_language, &base_version).await?;
+                let temp_id = get_container(&self, &base_language, &base_version).await?.ok_or_else(|| anyhow!("No available container for compilation"))?;
                 
                 let (ct, _, cse) = match base_language.as_str() {
                     "c" => handle_c_artifact(&self, &temp_id, filename, &base_code, &artifact_key, &redis_client, memory_bytes).await?,
@@ -426,6 +316,7 @@ impl CodeExecutor {
             None 
         };
         
+        // --- 4. Handle Compilation Errors ---
         if !compile_stderr.is_empty() {
             let error_message = String::from_utf8_lossy(&compile_stderr).to_string();
             let error_result = EvaluationResult {
@@ -443,6 +334,7 @@ impl CodeExecutor {
             return Ok(vec![error_result; requests.len()]);
         }
         
+        // --- 5. Parallel Execution of Test Cases ---
         let mut tasks = Vec::new();
         for request in requests {
             let self_clone = self.clone();
@@ -454,7 +346,8 @@ impl CodeExecutor {
             let artifact_binary_clone = artifact_binary.clone();
 
             let task = task::spawn(async move {
-                let container_id = get_container(&self_clone, &lang_clone, &version_clone).await?;
+                let container_id = get_container(&self_clone, &lang_clone, &version_clone).await?
+                    .ok_or_else(|| anyhow!("No available container for {}:{}", lang_clone, version_clone))?;
 
                 if is_compiled_language {
                     if let Some(binary_data) = artifact_binary_clone {
@@ -466,6 +359,7 @@ impl CodeExecutor {
                         header.set_mode(0o755);
                         header.set_cksum();
                         builder.append(&header, &binary_data[..])?;
+                        builder.finish()?;
                         let tar_data = builder.into_inner()?;
                         self_clone.docker.upload_to_container(&container_id, Some(UploadToContainerOptions { path: "/app", ..Default::default() }), tar_data.into()).await?;
                     } else {
@@ -473,14 +367,17 @@ impl CodeExecutor {
                         return Err(anyhow!("Artifact binary was expected but not found"));
                     }
                 } else { 
+                    // **FIX:** Replaced the fragile `echo` command with the robust TAR upload method for interpreted languages.
                     let mut builder = Builder::new(Vec::new());
                     let mut header = tar::Header::new_gnu();
                     header.set_path(&filename_clone)?;
                     header.set_size(code_clone.as_bytes().len() as u64);
-                    header.set_mode(0o755);
+                    header.set_mode(0o755); // Make script executable
                     header.set_cksum();
                     builder.append(&header, code_clone.as_bytes())?;
+                    builder.finish()?;
                     let tar_data = builder.into_inner()?;
+
                     self_clone.docker.upload_to_container(
                         &container_id,
                         Some(UploadToContainerOptions { path: "/app", ..Default::default() }),
@@ -489,7 +386,7 @@ impl CodeExecutor {
                 }
 
                 let run_start = Instant::now();
-                let escaped_stdin = request.stdin.replace('\\', "\\\\").replace('$', "\\$").replace('`', "\\`").replace('\"', "\\\"").replace('\'', "'\\''");
+                let escaped_stdin = request.stdin.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`").replace("\"", "\\\"").replace("'", "'\\''");
                 let final_cmd = vec!["sh".to_string(), "-c".to_string(), format!("printf '%s' '{}' | {}", escaped_stdin, run_cmd_clone.join(" "))];
                 let exec = self_clone.docker.create_exec(&container_id, CreateExecOptions { cmd: Some(final_cmd), attach_stdout: Some(true), attach_stderr: Some(true), ..Default::default() }).await?;
                 
@@ -533,6 +430,7 @@ impl CodeExecutor {
             tasks.push(task);
         }
         
+        // --- 6. Aggregation and Final Caching ---
         let results = join_all(tasks).await.into_iter()
             .map(|res| match res {
                 Ok(Ok(result)) => Ok(result),
