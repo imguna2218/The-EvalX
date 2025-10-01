@@ -71,7 +71,7 @@ impl IsolateSandbox {
             // Explicitly ensure PATH is set to include all necessary directories.
             .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             // --- Comprehensive directory mounting ---
-            .arg("--dir=/etc:noexec")
+            .arg("--dir=/etc")
             .arg("--dir=/bin")
             .arg("--dir=/usr/bin")
             .arg("--dir=/usr/local/bin")
@@ -152,8 +152,8 @@ impl IsolateSandbox {
 
         let (filename_to_write, run_command, java_home, node_path, python_path) = match language {
             "c" | "cpp" => ("main", vec!["./main"], "".to_string(), "".to_string(), "".to_string()),
-            "java" | "java21" => ("Main.class", vec!["/usr/bin/java", "Main"], "/usr/lib/jvm/java-21-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
-            "java11" => ("Main.class", vec!["/usr/bin/java", "Main"], "/usr/lib/jvm/java-11-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
+            "java" | "java21" => ("Main.class", vec!["/usr/lib/jvm/java-21-openjdk-amd64/bin/java", "-Xss512k", "-XX:ReservedCodeCacheSize=32m", "-cp", ".", "Main"], "/usr/lib/jvm/java-21-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
+            "java11" => ("Main.class", vec!["/usr/lib/jvm/java-11-openjdk-amd64/bin/java", "-Xss512k", "-XX:ReservedCodeCacheSize=32m", "-cp", ".", "Main"], "/usr/lib/jvm/java-11-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
             "python" => ("main.py", vec!["/usr/bin/python3", "main.py"], "".to_string(), "".to_string(), "/usr/lib/python3.10".to_string()),
             "javascript" => ("main.js", vec!["/usr/bin/node", "main.js"], "".to_string(), "/usr/lib/nodejs".to_string(), "".to_string()),
             _ => return Err(anyhow!("Unsupported language for run: {}", language)),
@@ -180,7 +180,7 @@ impl IsolateSandbox {
             // Explicitly ensure PATH is set to include all necessary directories.
             .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             // --- Comprehensive directory mounting for runtime ---
-            .arg("--dir=/etc:noexec")
+            .arg("--dir=/etc")
             .arg("--dir=/bin")
             .arg("--dir=/usr/bin")
             .arg("--dir=/usr/local/bin")
