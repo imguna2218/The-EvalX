@@ -45,15 +45,13 @@ impl IsolateSandbox {
         let box_id = BOX_ID_COUNTER.fetch_add(1, Ordering::Relaxed) % 1000;
         self.init_box(&box_id.to_string()).await?;
 
-        // --- REFACTORED: Decoupled logic from hardcoded paths ---
-        // Use simple command names and control the Java version via JAVA_HOME.
-        let (source_filename, executable_filename, compile_command, java_home) = match language {
-            "c" => ("main.c", "main", vec!["gcc", "-o", "main", "main.c"], "".to_string()),
-            "cpp" => ("main.cpp", "main", vec!["g++", "-o", "main", "main.cpp"], "".to_string()),
-            "java" | "java21" => ("Main.java", "Main.class", vec!["javac", "Main.java"], "/usr/lib/jvm/java-21-openjdk-amd64".to_string()),
-            "java11" => ("Main.java", "Main.class", vec!["javac", "Main.java"], "/usr/lib/jvm/java-11-openjdk-amd64".to_string()),
-            "python" => ("main.py", "main.py", vec!["echo", "no-compile"], "".to_string()),
-            "javascript" => ("main.js", "main.js", vec!["echo", "no-compile"], "".to_string()),
+        let (source_filename, executable_filename, compile_command, java_home, node_path, python_path) = match language {
+            "c" => ("main.c", "main", vec!["/usr/bin/gcc", "-o", "main", "main.c"], "".to_string(), "".to_string(), "".to_string()),
+            "cpp" => ("main.cpp", "main", vec!["/usr/bin/g++", "-o", "main", "main.cpp"], "".to_string(), "".to_string(), "".to_string()),
+            "java" | "java21" => ("Main.java", "Main.class", vec!["/usr/bin/javac", "Main.java"], "/usr/lib/jvm/java-21-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
+            "java11" => ("Main.java", "Main.class", vec!["/usr/bin/javac", "Main.java"], "/usr/lib/jvm/java-11-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
+            "python" => ("main.py", "main.py", vec!["echo", "no-compile"], "".to_string(), "".to_string(), "".to_string()),
+            "javascript" => ("main.js", "main.js", vec!["echo", "no-compile"], "".to_string(), "/usr/lib/nodejs".to_string(), "".to_string()),
             _ => return Err(anyhow!("Unsupported compiled language: {}", language)),
         };
 
@@ -67,29 +65,43 @@ impl IsolateSandbox {
             .arg(format!("--mem={}", mem_limit_kb))
             .arg("--fsize=102400")
             .arg("--processes=10")
-            // --- FIX: Comprehensive directory mounting ---
-            // Provide the complete filesystem environment required by the toolchains.
+            // --- Enhanced environment propagation ---
+            // Propagate the full host environment to ensure PATH and other vars are available.
+            .arg("--full-env")
+            // Explicitly ensure PATH is set to include all necessary directories.
+            .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            // --- Comprehensive directory mounting ---
             .arg("--dir=/etc:noexec")
             .arg("--dir=/bin")
             .arg("--dir=/usr/bin")
+            .arg("--dir=/usr/local/bin")
             .arg("--dir=/lib")
             .arg("--dir=/lib64")
             .arg("--dir=/usr/lib")
+            .arg("--dir=/usr/lib/gcc")
+            .arg("--dir=/usr/lib/nodejs")
+            .arg("--dir=/usr/lib/python3")
+            .arg("--dir=/usr/lib/python3.10")
+            .arg("--dir=/usr/lib/jvm")
             .arg("--dir=/lib/x86_64-linux-gnu")
             .arg("--dir=/usr/lib/x86_64-linux-gnu")
-            .arg("--dir=/etc/alternatives") // For update-alternatives
-            // Language-specific mounts
-            .arg("--dir=/usr/include") // For C/C++
-            .arg("--dir=/usr/lib/gcc/x86_64-linux-gnu/11") // For C/C++
-            .arg("--dir=/usr/lib/jvm/java-11-openjdk-amd64") // For Java 11
-            .arg("--dir=/usr/lib/jvm/java-21-openjdk-amd64") // For Java 21
-            .arg("--dir=/usr/share/java") // For Java
-            // --- FIX: Robust environment setup ---
-            .arg("--env=PATH=/usr/bin:/bin");
+            .arg("--dir=/etc/alternatives")
+            .arg("--dir=/usr/include")
+            .arg("--dir=/usr/lib/gcc/x86_64-linux-gnu/11")
+            .arg("--dir=/usr/lib/jvm/java-11-openjdk-amd64")
+            .arg("--dir=/usr/lib/jvm/java-21-openjdk-amd64")
+            .arg("--dir=/usr/share")
+            .arg("--dir=/usr/share/java");
 
-        // Conditionally set JAVA_HOME for Java compilation
+        // Set language-specific environment variables.
         if !java_home.is_empty() {
             cmd.arg(format!("--env=JAVA_HOME={}", java_home));
+        }
+        if !node_path.is_empty() {
+            cmd.arg(format!("--env=NODE_PATH={}", node_path));
+        }
+        if !python_path.is_empty() {
+            cmd.arg(format!("--env=PYTHONPATH={}", python_path));
         }
 
         cmd.arg("--run")
@@ -138,13 +150,12 @@ impl IsolateSandbox {
         let box_id = BOX_ID_COUNTER.fetch_add(1, Ordering::Relaxed) % 1000;
         self.init_box(&box_id.to_string()).await?;
 
-        // --- REFACTORED: Use simple command names ---
-        let (filename_to_write, run_command, java_home) = match language {
-            "c" | "cpp" => ("main", vec!["./main"], "".to_string()),
-            "java" | "java21" => ("Main.class", vec!["java", "Main"], "/usr/lib/jvm/java-21-openjdk-amd64".to_string()),
-            "java11" => ("Main.class", vec!["java", "Main"], "/usr/lib/jvm/java-11-openjdk-amd64".to_string()),
-            "python" => ("main.py", vec!["python3", "main.py"], "".to_string()),
-            "javascript" => ("main.js", vec!["node", "main.js"], "".to_string()),
+        let (filename_to_write, run_command, java_home, node_path, python_path) = match language {
+            "c" | "cpp" => ("main", vec!["./main"], "".to_string(), "".to_string(), "".to_string()),
+            "java" | "java21" => ("Main.class", vec!["/usr/bin/java", "Main"], "/usr/lib/jvm/java-21-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
+            "java11" => ("Main.class", vec!["/usr/bin/java", "Main"], "/usr/lib/jvm/java-11-openjdk-amd64".to_string(), "".to_string(), "".to_string()),
+            "python" => ("main.py", vec!["/usr/bin/python3", "main.py"], "".to_string(), "".to_string(), "/usr/lib/python3.10".to_string()),
+            "javascript" => ("main.js", vec!["/usr/bin/node", "main.js"], "".to_string(), "/usr/lib/nodejs".to_string(), "".to_string()),
             _ => return Err(anyhow!("Unsupported language for run: {}", language)),
         };
 
@@ -164,25 +175,41 @@ impl IsolateSandbox {
             .arg(format!("--mem={}", mem_limit_kb))
             .arg("--fsize=10240")
             .arg("--processes=5")
-            // --- FIX: Comprehensive directory mounting for runtime ---
+             // --- Enhanced environment propagation ---
+            .arg("--full-env")
+            // Explicitly ensure PATH is set to include all necessary directories.
+            .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            // --- Comprehensive directory mounting for runtime ---
             .arg("--dir=/etc:noexec")
             .arg("--dir=/bin")
             .arg("--dir=/usr/bin")
+            .arg("--dir=/usr/local/bin")
             .arg("--dir=/lib")
             .arg("--dir=/lib64")
             .arg("--dir=/usr/lib")
+            .arg("--dir=/usr/lib/gcc")
+            .arg("--dir=/usr/lib/nodejs")
+            .arg("--dir=/usr/lib/python3")
+            .arg("--dir=/usr/lib/python3.10")
+            .arg("--dir=/usr/lib/jvm")
             .arg("--dir=/lib/x86_64-linux-gnu")
             .arg("--dir=/usr/lib/x86_64-linux-gnu")
             .arg("--dir=/etc/alternatives")
-            .arg("--dir=/usr/lib/python3.10") // For Python
-            .arg("--dir=/usr/lib/jvm/java-11-openjdk-amd64") // For Java
-            .arg("--dir=/usr/lib/jvm/java-21-openjdk-amd64") // For Java
-            .arg("--dir=/usr/share/java") // For Java
-            // --- FIX: Robust environment setup ---
-            .arg("--env=PATH=/usr/bin:/bin");
-        
+            .arg("--dir=/usr/lib/python3.10")
+            .arg("--dir=/usr/lib/jvm/java-11-openjdk-amd64")
+            .arg("--dir=/usr/lib/jvm/java-21-openjdk-amd64")
+            .arg("--dir=/usr/share")
+            .arg("--dir=/usr/share/java");
+
+        // Set language-specific environment variables.
         if !java_home.is_empty() {
             cmd.arg(format!("--env=JAVA_HOME={}", java_home));
+        }
+        if !node_path.is_empty() {
+            cmd.arg(format!("--env=NODE_PATH={}", node_path));
+        }
+        if !python_path.is_empty() {
+            cmd.arg(format!("--env=PYTHONPATH={}", python_path));
         }
 
         cmd.arg("--stdin=stdin.txt")

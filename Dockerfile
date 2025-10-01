@@ -52,6 +52,24 @@ RUN update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-11-openjd
     update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-21-openjdk-amd64/bin/java 2 && \
     update-alternatives --install /usr/bin/javac javac /usr/lib/jvm/java-21-openjdk-amd64/bin/javac 2
 
+# Verification steps: Ensure toolchains are properly installed and binaries are accessible
+RUN gcc --version && \
+    g++ --version && \
+    javac -version && \
+    python3 --version && \
+    node --version && \
+    which gcc && \
+    which g++ && \
+    which javac && \
+    which python3 && \
+    which node && \
+    ls -la /usr/lib/gcc && \
+    ls -la /usr/lib/jvm && \
+    ls -la /usr/lib/nodejs && \
+    ls -la /usr/lib/python3 && \
+    ls -la /usr/lib/python3.10 && \
+    ls -la /usr/lib/x86_64-linux-gnu | head -10
+
 # Build and install isolate using its official 'install' target for a robust setup.
 RUN groupadd --system isolate && \
     git clone https://github.com/ioi/isolate.git /tmp/isolate && \

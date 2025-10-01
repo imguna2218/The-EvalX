@@ -28,13 +28,11 @@ services:
     ports:
       - "3000:3000"
     env_file: .env
-    # REMOVED: privileged: true
-    # ADDED: Specific capabilities for Isolate, enforcing least privilege.
-    cap_add:
-      - SYS_ADMIN  # Required for mount, chroot, and namespace operations
-      - SYS_CHROOT # Explicitly allows chroot
-      - SETUID     # Allows changing user ID
-      - SETGID     # Allows changing group ID
+    # --- FIX: Reverted to privileged mode ---
+    # The 'cap_add' list was insufficient for Isolate's need to create
+    # private mount namespaces, causing the "Permission denied" error.
+    # Privileged mode grants the container the necessary kernel permissions.
+    privileged: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -51,15 +49,10 @@ services:
     restart: unless-stopped
     command: ["./evalx", "worker"]
     env_file: .env
-    # REMOVED: privileged: true
-    # ADDED: The same capabilities are required for workers as they run Isolate.
-    cap_add:
-      - SYS_ADMIN
-      - SYS_CHROOT
-      - SETUID
-      - SETGID
-    # REMOVED: The 'deploy' key, which is not compatible with 'docker compose up'
-    # and was causing the YAML parsing error. Use '--scale' on the command line instead.
+    # --- FIX: Reverted to privileged mode ---
+    # The workers execute Isolate directly, so they require the same
+    # level of permissions as the main app container.
+    privileged: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -76,3 +69,4 @@ networks:
 # Define the named volume for Redis data persistence
 volumes:
   redis-data:
+
