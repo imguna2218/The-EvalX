@@ -6,13 +6,8 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-echo "--- Ensuring Docker daemon is in a clean state by restarting it... ---"
-echo "This step prevents hangs and networking errors."
-echo "You may be prompted for your password."
-# CHANGED: Moved this to the very beginning of the script.
-# This is the most reliable way to fix a hung or unresponsive Docker daemon.
-sudo systemctl restart docker
-echo "Docker daemon restarted successfully."
+# NOTE: The aggressive docker restart command has been removed to prevent network instability.
+# 'docker compose down' is sufficient for ensuring a clean state.
 
 echo ""
 echo "--- Stopping any existing evalX containers... ---"
@@ -26,7 +21,8 @@ docker compose build
 echo ""
 echo "--- Starting all services in detached mode... ---"
 # This will start the 'app', 'redis', and scale 'worker' to 4 replicas.
-docker compose up -d --scale worker=4
+# ADDED: --wait flag ensures containers are healthy before the command exits.
+docker compose up -d --wait --scale worker=4
 
 echo ""
 echo "--- Your evalX environment is now running! ---"
@@ -46,4 +42,3 @@ echo "--- Setup complete. To follow logs continuously, run: ---"
 echo "docker compose logs -f"
 echo "--- To see logs for a specific service, run (e.g., for a worker): ---"
 echo "docker compose logs -f worker"
-

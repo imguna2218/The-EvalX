@@ -1,19 +1,15 @@
-version: '3.8'
-
 services:
   # The Redis service, now with persistent data storage and custom config
   redis:
     image: redis:7.0-alpine
     container_name: evalx_redis
-    restart: always
+    restart: unless-stopped
+    user: "root"
     ports:
       - "6379:6379"
-    # Mount the custom redis.conf to apply your settings
     volumes:
       - ./Docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
-      # Use a named volume to make sure data persists even if the container is removed
       - redis-data:/data
-    command: redis-server /usr/local/etc/redis/redis.conf
     networks:
       - evalx-network
     healthcheck:
@@ -28,40 +24,47 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: evalx_app
-    restart: always
+    restart: unless-stopped
     ports:
       - "3000:3000"
     env_file: .env
-    # ADDED: Mount the Docker socket to allow container management from the app
+    # REMOVED: privileged: true
+    # ADDED: Specific capabilities for Isolate, enforcing least privilege.
+    cap_add:
+      - SYS_ADMIN  # Required for mount, chroot, and namespace operations
+      - SYS_CHROOT # Explicitly allows chroot
+      - SETUID     # Allows changing user ID
+      - SETGID     # Allows changing group ID
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    # The app service depends on redis being healthy before it starts
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - evalx-network
 
-  # The background worker service, which can be scaled
+  # The background worker service
   worker:
     build:
       context: .
       dockerfile: Dockerfile
-    # REMOVED: The container_name line was removed to allow scaling.
-    restart: always
-    # This command tells the application to start in "worker" mode
+    restart: unless-stopped
     command: ["./evalx", "worker"]
     env_file: .env
-    # ADDED: Mount the Docker socket to allow container management from workers
+    # REMOVED: privileged: true
+    # ADDED: The same capabilities are required for workers as they run Isolate.
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+    # REMOVED: The 'deploy' key, which is not compatible with 'docker compose up'
+    # and was causing the YAML parsing error. Use '--scale' on the command line instead.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    # Workers also depend on redis being healthy
     depends_on:
       redis:
         condition: service_healthy
-    # This section allows you to easily scale the number of worker containers
-    deploy:
-      replicas: 4
     networks:
       - evalx-network
 

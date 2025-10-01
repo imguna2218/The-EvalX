@@ -82,7 +82,8 @@ impl QueueManager {
                 Ok(c) => c,
                 Err(e) => {
                     error!("Failed to get Redis connection: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // MODIFIED: Increased sleep duration for more resilience.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
             };
@@ -90,7 +91,8 @@ impl QueueManager {
                 Ok(res) => res,
                 Err(e) => {
                     error!("Failed to dequeue task: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // MODIFIED: Increased sleep duration for more resilience.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
             };

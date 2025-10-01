@@ -1,34 +1,43 @@
 use axum::{
+    body::Body as AxumBody,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Router,
-    response::Response,
-    middleware::{self, Next},
-    http::{Request, StatusCode},
-    body::Body as AxumBody,
 };
+use prometheus::{Encoder, TextEncoder};
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::broadcast;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use std::time::Instant;
-use tokio::sync::broadcast;
 
 use crate::caching::redis_client::RedisClient;
-use crate::controllers::executionControllers::{handle_execute, handle_execute_batch, handle_execute_parallel, handle_submission_status};
+// MODIFIED: Removed the import for the deleted `handle_execute_parallel` function.
+use crate::controllers::executionControllers::{
+    handle_execute, handle_execute_batch, handle_submission_status,
+};
 use crate::controllers::notificationControllers::handle_ws_upgrade;
 use crate::monitoring::metrics::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_SECONDS};
 use crate::queue_management::QueueManager;
 use crate::types::index::{CodeExecutor, ExecutionNotification};
-use prometheus::{Encoder, TextEncoder};
 
 // Handler function to gather and serve Prometheus metrics.
 async fn metrics_handler() -> (StatusCode, String) {
     let encoder = TextEncoder::new();
     let mut buffer = vec![];
     if let Err(e) = encoder.encode(&prometheus::gather(), &mut buffer) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not encode metrics: {}", e));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not encode metrics: {}", e),
+        );
     }
-    (StatusCode::OK, String::from_utf8(buffer).unwrap_or_default())
+    (
+        StatusCode::OK,
+        String::from_utf8(buffer).unwrap_or_default(),
+    )
 }
 
 // Middleware to track HTTP request metrics.
@@ -41,11 +50,15 @@ async fn track_metrics(req: Request<AxumBody>, next: Next) -> Response {
 
     let latency = start.elapsed().as_secs_f64();
     let status = response.status().as_u16().to_string();
-    
+
     // Increment request counter and observe latency.
-    HTTP_REQUESTS_TOTAL.with_label_values(&[method.as_str(), &path, &status]).inc();
-    HTTP_REQUEST_DURATION_SECONDS.with_label_values(&[method.as_str(), &path]).observe(latency);
-    
+    HTTP_REQUESTS_TOTAL
+        .with_label_values(&[method.as_str(), &path, &status])
+        .inc();
+    HTTP_REQUEST_DURATION_SECONDS
+        .with_label_values(&[method.as_str(), &path])
+        .observe(latency);
+
     response
 }
 
@@ -63,7 +76,7 @@ pub fn create_router(
 
     Router::new()
         .route("/execute", post(handle_execute))
-        .route("/execute-parallel", post(handle_execute_parallel))
+        // MODIFIED: Removed the route for the deleted `handle_execute_parallel` function.
         .route("/execute/batch", post(handle_execute_batch))
         .route("/submissions/:token", get(handle_submission_status))
         .route("/ws", get(handle_ws_upgrade))
