@@ -25,8 +25,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install all runtime dependencies for languages, and build dependencies for isolate
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     g++ \
@@ -43,8 +42,13 @@ RUN apt-get update && \
     asciidoc \
     libxml2-utils \
     docbook-xml \
-    docbook-xsl && \
-    rm -rf /var/lib/apt/lists/*
+    docbook-xsl \
+    systemd \
+    systemd-sysv \
+    dbus \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
 
 # ADD: Create Java alternatives to ensure Java is properly linked in /usr/bin
 RUN update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-11-openjdk-amd64/bin/java 1 && \
@@ -74,19 +78,41 @@ RUN gcc --version && \
 RUN groupadd --system isolate && \
     git clone https://github.com/ioi/isolate.git /tmp/isolate && \
     cd /tmp/isolate && \
-    # The default branch for this repository is 'master', not 'main'.
     git checkout master && \
     make install && \
-    cd / && \
-    rm -rf /tmp/isolate
+    cd / && rm -rf /tmp/isolate && \
+    mkdir -p /usr/local/lib/systemd/system
+
+# Create isolate cgroup configuration
+RUN mkdir -p /run/isolate && echo "/sys/fs/cgroup/system.slice/isolate.service" > /run/isolate/cgroup
+
 
 WORKDIR /app
 
 # Copy the final compiled binary from the builder stage
 COPY --from=builder /usr/src/evalx/target/release/evalx /app/evalx
 
-# Expose the port the app runs on
+# Copy isolate startup script
+COPY start-isolate.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/start-isolate.sh
+
+# Create systemd service files
+RUN echo '[Unit]\n\
+Description=Isolate sandbox control service\n\
+After=systemd-tmpfiles-setup.service\n\
+\n\
+[Service]\n\
+Type=notify\n\
+ExecStart=/usr/local/sbin/isolate-cg-keeper\n\
+Delegate=yes\n\
+RemainAfterExit=yes\n\
+User=root\n\
+Group=root\n\
+\n\
+[Install]\n\
+WantedBy=multi-user.target' > /usr/local/lib/systemd/system/isolate.service
+
 EXPOSE 3000
 
-# The default command to run when the container starts
+ENTRYPOINT ["/usr/local/bin/start-isolate.sh"]
 CMD ["/app/evalx"]

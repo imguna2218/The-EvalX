@@ -1,5 +1,4 @@
 services:
-  # The Redis service, now with persistent data storage and custom config
   redis:
     image: redis:7.0-alpine
     container_name: evalx_redis
@@ -18,7 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # The main web application service
   app:
     build:
       context: .
@@ -28,20 +26,26 @@ services:
     ports:
       - "3000:3000"
     env_file: .env
-    # --- FIX: Reverted to privileged mode ---
-    # The 'cap_add' list was insufficient for Isolate's need to create
-    # private mount namespaces, causing the "Permission denied" error.
-    # Privileged mode grants the container the necessary kernel permissions.
     privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - SYS_PTRACE
+      - SYS_NICE
+      - SYS_RESOURCE
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - /run/systemd/system:/run/systemd/system:ro
+      - /var/lib/systemd:/var/lib/systemd:ro
+      - /usr/lib/systemd:/usr/lib/systemd:ro
+      - /usr/local/lib/systemd:/usr/local/lib/systemd:rw
+      - /var/local/lib/isolate:/var/local/lib/isolate:shared
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - evalx-network
 
-  # The background worker service
   worker:
     build:
       context: .
@@ -49,24 +53,23 @@ services:
     restart: unless-stopped
     command: ["./evalx", "worker"]
     env_file: .env
-    # --- FIX: Reverted to privileged mode ---
-    # The workers execute Isolate directly, so they require the same
-    # level of permissions as the main app container.
     privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+      - SYS_RESOURCE
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw,rslave
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - evalx-network
 
-# Define the network for services to communicate
 networks:
   evalx-network:
     driver: bridge
 
-# Define the named volume for Redis data persistence
 volumes:
   redis-data:
-
