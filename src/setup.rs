@@ -19,7 +19,7 @@ pub async fn initialize_executor() -> Result<(
     dotenv::dotenv().ok();
 
     // This variable now controls the number of concurrent Isolate sandboxes, not Docker containers.
-    let max_sandboxes = env::var("MAX_CONCURRENT_CONTAINERS")
+    let max_sandboxes = env::var("MAX_CONCURRENT_SANDBOXES")
         .unwrap_or_else(|_| "500".to_string())
         .parse::<usize>()?;
     info!("Max concurrent Isolate sandboxes: {}", max_sandboxes);

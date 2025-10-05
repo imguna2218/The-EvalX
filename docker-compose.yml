@@ -17,56 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: evalx_app
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    env_file: .env
-    privileged: true
-    cap_add:
-      - SYS_ADMIN
-      - SYS_PTRACE
-      - SYS_NICE
-      - SYS_RESOURCE
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      - /run/systemd/system:/run/systemd/system:ro
-      - /var/lib/systemd:/var/lib/systemd:ro
-      - /usr/lib/systemd:/usr/lib/systemd:ro
-      - /usr/local/lib/systemd:/usr/local/lib/systemd:rw
-      - /var/local/lib/isolate:/var/local/lib/isolate:shared
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - evalx-network
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    command: ["./evalx", "worker"]
-    env_file: .env
-    privileged: true
-    cap_add:
-      - SYS_ADMIN
-      - SYS_NICE
-      - SYS_RESOURCE
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw,rslave
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - evalx-network
-
 networks:
   evalx-network:
     driver: bridge

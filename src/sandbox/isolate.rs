@@ -1,16 +1,12 @@
 // src/sandbox/isolate.rs
 use anyhow::{anyhow, Result};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use std::path::Path;
 use tracing::{debug, warn};
-
-// A global, thread-safe counter to generate unique numeric box IDs for Isolate.
-static BOX_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub struct CompilationResult {
     pub success: bool,
@@ -31,27 +27,18 @@ pub struct RunResult {
 
 pub struct IsolateSandbox;
 
-const JAVA_JVM_FLAGS: &[&str] = &[
-    "-Xms16m",                   // tiny initial heap
-    "-Xmx128m",                  // smaller max heap
-    "-XX:MaxMetaspaceSize=32m",  // cap metaspace
-    "-XX:+UseSerialGC",          // single-threaded GC
-    "-XX:CICompilerCount=1",     // single compiler thread
-    "-XX:ParallelGCThreads=1",   // limit parallel GC threads
-    "-XX:ConcGCThreads=1",       // limit concurrent GC threads
-    "-XX:ThreadStackSize=128k",  // minimal stack per thread
-];
-
 impl IsolateSandbox {
-
     // Generate a truly unique box ID using timestamp and counter
     fn generate_unique_box_id() -> String {
-        let counter = BOX_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        // Use a larger modulo to reduce collision chance while staying in range
-        let box_id = (counter % 900) + 100; // Range: 100-999
-        box_id.to_string()
+        use std::process;
+        let pid = process::id();
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // The box ID for isolate must be numeric. We combine pid and time and take the last few digits.
+        format!("{}", (pid as u128 + time) % 1000)
     }
-
 
     pub async fn compile(
         &self,
@@ -64,7 +51,7 @@ impl IsolateSandbox {
         let box_id = Self::generate_unique_box_id();
         self.init_box(&box_id).await?;
 
-        let (source_filename, executable_filename, mut compile_command, java_home, node_path, python_path) = match language {
+        let (source_filename, executable_filename, compile_command, java_home, node_path, python_path) = match language {
             "c" => (
                 "main.c",
                 "main",
@@ -82,9 +69,15 @@ impl IsolateSandbox {
                 "".to_string(),
             ),
             "java" | "java21" => {
-                let mut v = vec!["/usr/lib/jvm/java-21-openjdk-amd64/bin/javac"];
-                v.extend(JAVA_JVM_FLAGS.iter().map(|s| *s));
-                v.extend(&["-d", ".", "Main.java"]);
+                let v = vec![
+                    "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",
+                    "-J-Xms512m",
+                    "-J-Xmx512m",
+                    "-J-XX:MaxMetaspaceSize=192m",
+                    "-J-XX:ReservedCodeCacheSize=64m",
+                    "-J-XX:+UseSerialGC",
+                    "Main.java",
+                ];
                 (
                     "Main.java",
                     "Main.class",
@@ -95,9 +88,15 @@ impl IsolateSandbox {
                 )
             },
             "java11" => {
-                let mut v = vec!["/usr/lib/jvm/java-11-openjdk-amd64/bin/javac"];
-                v.extend(JAVA_JVM_FLAGS.iter().map(|s| *s));
-                v.extend(&["-d", ".", "Main.java"]);
+                let v = vec![
+                    "/usr/lib/jvm/java-11-openjdk-amd64/bin/javac",
+                    "-J-Xms512m",
+                    "-J-Xmx512m",
+                    "-J-XX:MaxMetaspaceSize=192m",
+                    "-J-XX:ReservedCodeCacheSize=64m",
+                    "-J-XX:+UseSerialGC",
+                    "Main.java",
+                ];
                 (
                     "Main.java",
                     "Main.class",
@@ -129,51 +128,76 @@ impl IsolateSandbox {
         let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
         fs::write(format!("{}/{}", box_path, source_filename), code).await?;
 
-        let mut cmd = Command::new("isolate");
-        cmd.arg("--cg")
-           .arg(format!("--box-id={}", box_id))
-           //.arg("--cg-dir=/sys/fs/cgroup/isolate")
-           .arg(format!("--time={}", time_limit_s))
-           .arg(format!("--wall-time={}", time_limit_s * 2));
+        let mut cmd;
+
+        if language.starts_with("java") {
+            // --- JAVA "CLEAN ROOM" CHROOT STRATEGY ---
+            cmd = Command::new("setarch");
+            cmd.arg(std::env::consts::ARCH).arg("-R").arg("isolate");
+
+            // Add standard isolate args
+            cmd.arg("--cg")
+               .arg(format!("--box-id={}", box_id))
+               .arg(format!("--time={}", time_limit_s))
+               .arg(format!("--wall-time={}", time_limit_s * 2))
+               .arg("--fsize=102400");
+
+            // Mount the pre-built chroot environment as the sandbox root
+            let chroot_path = if language == "java11" {
+                std::env::var("JAVA11_CHROOT_PATH").unwrap_or_else(|_| "/opt/java11_chroot".to_string())
+            } else { // Assumes java21 for "java" or "java21"
+                std::env::var("JAVA21_CHROOT_PATH").unwrap_or_else(|_| "/opt/java21_chroot".to_string())
+            };
+            // CORRECTED: Use '=' instead of ':' to map the directory path
+            cmd.arg(format!("--dir={}={}", chroot_path, "/"));
+            // Mount /etc for essential configs like resolv.conf as per the successful script
+            cmd.arg("--dir=/etc");
+        } else {
+            // --- ORIGINAL STRATEGY FOR ALL OTHER LANGUAGES ---
+            cmd = Command::new("isolate");
+            cmd.arg("--cg")
+               .arg(format!("--box-id={}", box_id))
+               .arg(format!("--time={}", time_limit_s))
+               .arg(format!("--wall-time={}", time_limit_s * 2))
+               .arg("--fsize=102400");
+
+            // Mount a wide range of host directories
+            cmd.arg("--full-env")
+                .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .arg("--dir=/etc")
+                .arg("--dir=/bin")
+                .arg("--dir=/usr/bin")
+                .arg("--dir=/usr/local/bin")
+                .arg("--dir=/lib")
+                .arg("--dir=/lib64")
+                .arg("--dir=/usr/lib")
+                .arg("--dir=/usr/lib/gcc")
+                .arg("--dir=/usr/lib/nodejs")
+                .arg("--dir=/usr/lib/python3")
+                .arg("--dir=/usr/lib/python3.10")
+                .arg("--dir=/usr/lib/jvm")
+                .arg("--dir=/lib/x86_64-linux-gnu")
+                .arg("--dir=/usr/lib/x86_64-linux-gnu")
+                .arg("--dir=/etc/alternatives")
+                .arg("--dir=/usr/include")
+                .arg("--dir=/usr/lib/gcc/x86_64-linux-gnu/11")
+                .arg("--dir=/proc");
+        }
+
+        // Set memory and process limits
         let compile_mem_limit_kb = match language {
-            "java" | "java11" | "java21" => 1048576,
+            "java" | "java11" | "java21" => 1536000, // 1.5GB, as per successful script
             _ => mem_limit_kb,
         };
         cmd.arg(format!("--mem={}", compile_mem_limit_kb));
-        cmd.arg("--fsize=102400");
 
         let process_count = match language {
-            "java" | "java11" | "java21" => 50,
+            "java" | "java11" | "java21" => 150,
             _ => 10,
         };
         cmd.arg(format!("--processes={}", process_count));
 
-        cmd.arg("--full-env")
-           .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-           .arg("--dir=/etc")
-           .arg("--dir=/bin")
-           .arg("--dir=/usr/bin")
-           .arg("--dir=/usr/local/bin")
-           .arg("--dir=/lib")
-           .arg("--dir=/lib64")
-           .arg("--dir=/usr/lib")
-           .arg("--dir=/usr/lib/gcc")
-           .arg("--dir=/usr/lib/nodejs")
-           .arg("--dir=/usr/lib/python3")
-           .arg("--dir=/usr/lib/python3.10")
-           .arg("--dir=/usr/lib/jvm")
-           .arg("--dir=/lib/x86_64-linux-gnu")
-           .arg("--dir=/usr/lib/x86_64-linux-gnu")
-           .arg("--dir=/etc/alternatives")
-           .arg("--dir=/usr/include")
-           .arg("--dir=/usr/lib/gcc/x86_64-linux-gnu/11")
-           .arg("--dir=/usr/lib/jvm/java-11-openjdk-amd64")
-           .arg("--dir=/usr/lib/jvm/java-21-openjdk-amd64")
-           .arg("--dir=/usr/share")
-           .arg("--dir=/usr/share/java")
-           .arg("--dir=/proc");
-
-        if !java_home.is_empty() {
+        if !java_home.is_empty() && !language.starts_with("java") {
             cmd.arg(format!("--env=JAVA_HOME={}", java_home));
         }
         if !node_path.is_empty() {
@@ -202,19 +226,18 @@ impl IsolateSandbox {
                 success: true,
                 compile_time,
                 binary: Some(binary),
-                stderr
+                stderr,
             }
         } else {
             CompilationResult {
                 success: false,
                 compile_time,
                 binary: None,
-                stderr
+                stderr,
             }
         };
 
         self.cleanup_box(&box_id).await?;
-        // Add delay to ensure cgroup cleanup completes
         sleep(Duration::from_millis(100)).await;
         Ok(result)
     }
@@ -225,23 +248,28 @@ impl IsolateSandbox {
         code_or_binary: &[u8],
         stdin: &str,
         time_limit_s: f64,
-        mem_limit_kb: u64
+        mem_limit_kb: u64,
     ) -> Result<RunResult> {
         let box_id = Self::generate_unique_box_id();
         self.init_box(&box_id).await?;
 
-        let (filename_to_write, mut run_command, java_home, node_path, python_path) = match language {
+        let (filename_to_write, run_command, java_home, node_path, python_path) = match language {
             "c" | "cpp" => (
                 "main",
-                vec!["./main"],
+                vec!["./main".to_string()],
                 "".to_string(),
                 "".to_string(),
                 "".to_string(),
             ),
             "java" | "java21" => {
-                let mut v = vec!["/usr/lib/jvm/java-21-openjdk-amd64/bin/java"];
-                v.extend(JAVA_JVM_FLAGS.iter().map(|s| *s));
-                v.extend(&["-cp", ".", "Main"]);
+                let v = vec![
+                    "/usr/lib/jvm/java-21-openjdk-amd64/bin/java".to_string(),
+                    "-Xms256m".to_string(), "-Xmx256m".to_string(),
+                    "-XX:MaxMetaspaceSize=64m".to_string(),
+                    "-XX:ReservedCodeCacheSize=32m".to_string(),
+                    "-XX:+UseSerialGC".to_string(),
+                    "Main".to_string(),
+                ];
                 (
                     "Main.class",
                     v,
@@ -251,9 +279,14 @@ impl IsolateSandbox {
                 )
             },
             "java11" => {
-                let mut v = vec!["/usr/lib/jvm/java-11-openjdk-amd64/bin/java"];
-                v.extend(JAVA_JVM_FLAGS.iter().map(|s| *s));
-                v.extend(&["-cp", ".", "Main"]);
+                let v = vec![
+                    "/usr/lib/jvm/java-11-openjdk-amd64/bin/java".to_string(),
+                    "-Xms256m".to_string(), "-Xmx256m".to_string(),
+                    "-XX:MaxMetaspaceSize=64m".to_string(),
+                    "-XX:ReservedCodeCacheSize=32m".to_string(),
+                    "-XX:+UseSerialGC".to_string(),
+                    "Main".to_string(),
+                ];
                 (
                     "Main.class",
                     v,
@@ -264,14 +297,14 @@ impl IsolateSandbox {
             },
             "python" => (
                 "main.py",
-                vec!["/usr/bin/python3", "main.py"],
+                vec!["/usr/bin/python3".to_string(), "main.py".to_string()],
                 "".to_string(),
                 "".to_string(),
                 "/usr/lib/python3.10".to_string(),
             ),
             "javascript" => (
                 "main.js",
-                vec!["/usr/bin/node", "main.js"],
+                vec!["/usr/bin/node".to_string(), "main.js".to_string()],
                 "".to_string(),
                 "/usr/lib/nodejs".to_string(),
                 "".to_string(),
@@ -287,7 +320,6 @@ impl IsolateSandbox {
         }
         fs::write(format!("{}/stdin.txt", box_path), stdin).await?;
 
-        // Wait for the box directory to exist before running isolate
         let mut retries = 0;
         while !Path::new(&box_path).exists() && retries < 10 {
             warn!("Box path {} not found, waiting...", box_path);
@@ -299,49 +331,70 @@ impl IsolateSandbox {
         }
 
         let meta_file_path = format!("/tmp/isolate_{}.txt", box_id);
-        let mut cmd = Command::new("isolate");
-        cmd.arg("--cg")
-           .arg(format!("--box-id={}", box_id))
-           //.arg("--cg-dir=/sys/fs/cgroup/isolate")
-           .arg(format!("--time={}", time_limit_s))
-           .arg(format!("--wall-time={}", time_limit_s * 2.0));
+        let mut cmd;
+
+        if language.starts_with("java") {
+            // --- JAVA "CLEAN ROOM" CHROOT STRATEGY ---
+            cmd = Command::new("setarch");
+            cmd.arg(std::env::consts::ARCH).arg("-R").arg("isolate");
+
+            cmd.arg("--cg")
+               .arg(format!("--box-id={}", box_id))
+               .arg(format!("--time={}", time_limit_s))
+               .arg(format!("--wall-time={}", time_limit_s * 2.0))
+               .arg("--fsize=10240");
+
+            let chroot_path = if language == "java11" {
+                std::env::var("JAVA11_CHROOT_PATH").unwrap_or_else(|_| "/opt/java11_chroot".to_string())
+            } else {
+                std::env::var("JAVA21_CHROOT_PATH").unwrap_or_else(|_| "/opt/java21_chroot".to_string())
+            };
+            // CORRECTED: Use '=' instead of ':' to map the directory path
+            cmd.arg(format!("--dir={}={}", chroot_path, "/"));
+            cmd.arg("--dir=/etc");
+        } else {
+            // --- ORIGINAL STRATEGY FOR ALL OTHER LANGUAGES ---
+            cmd = Command::new("isolate");
+            cmd.arg("--cg")
+               .arg(format!("--box-id={}", box_id))
+               .arg(format!("--time={}", time_limit_s))
+               .arg(format!("--wall-time={}", time_limit_s * 2.0))
+               .arg("--fsize=10240");
+
+            cmd.arg("--full-env")
+                .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .arg("--dir=/etc")
+                .arg("--dir=/bin")
+                .arg("--dir=/usr/bin")
+                .arg("--dir=/usr/local/bin")
+                .arg("--dir=/lib")
+                .arg("--dir=/lib64")
+                .arg("--dir=/usr/lib")
+                .arg("--dir=/usr/lib/gcc")
+                .arg("--dir=/usr/lib/nodejs")
+                .arg("--dir=/usr/lib/python3")
+                .arg("--dir=/usr/lib/python3.10")
+                .arg("--dir=/usr/lib/jvm")
+                .arg("--dir=/lib/x86_64-linux-gnu")
+                .arg("--dir=/usr/lib/x86_64-linux-gnu")
+                .arg("--dir=/etc/alternatives")
+                .arg("--dir=/usr/lib/python3.10")
+                .arg("--dir=/proc");
+        }
+
         let final_mem_limit_kb = match language {
-            "java" | "java11" | "java21" => 1048576, // 1GB for Java runtime
+            "java" | "java11" | "java21" => 786432, // 768MB, as per successful script
             _ => mem_limit_kb,
         };
         cmd.arg(format!("--mem={}", final_mem_limit_kb));
+
         let process_count = match language {
             "java" | "java11" | "java21" => 50,
             _ => 5,
         };
         cmd.arg(format!("--processes={}", process_count));
 
-        cmd.arg("--fsize=10240")
-           .arg("--full-env")
-           .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-           .arg("--dir=/etc")
-           .arg("--dir=/bin")
-           .arg("--dir=/usr/bin")
-           .arg("--dir=/usr/local/bin")
-           .arg("--dir=/lib")
-           .arg("--dir=/lib64")
-           .arg("--dir=/usr/lib")
-           .arg("--dir=/usr/lib/gcc")
-           .arg("--dir=/usr/lib/nodejs")
-           .arg("--dir=/usr/lib/python3")
-           .arg("--dir=/usr/lib/python3.10")
-           .arg("--dir=/usr/lib/jvm")
-           .arg("--dir=/lib/x86_64-linux-gnu")
-           .arg("--dir=/usr/lib/x86_64-linux-gnu")
-           .arg("--dir=/etc/alternatives")
-           .arg("--dir=/usr/lib/python3.10")
-           .arg("--dir=/usr/lib/jvm/java-11-openjdk-amd64")
-           .arg("--dir=/usr/lib/jvm/java-21-openjdk-amd64")
-           .arg("--dir=/usr/share")
-           .arg("--dir=/usr/share/java")
-           .arg("--dir=/proc");
-
-        if !java_home.is_empty() {
+        if !java_home.is_empty() && !language.starts_with("java") {
             cmd.arg(format!("--env=JAVA_HOME={}", java_home));
         }
         if !node_path.is_empty() {
@@ -394,13 +447,11 @@ impl IsolateSandbox {
             status,
         };
         self.cleanup_box(&box_id).await?;
-        // Add delay to ensure cgroup cleanup completes
         sleep(Duration::from_millis(100)).await;
         Ok(result)
     }
 
     async fn init_box(&self, box_id: &str) -> Result<()> {
-        // Check if cgroup directory already exists and wait for cleanup
         let cgroup_path = format!("/sys/fs/cgroup/system.slice/isolate.service/box-{}", box_id);
         let mut retries = 0;
         while Path::new(&cgroup_path).exists() && retries < 20 {
@@ -412,7 +463,6 @@ impl IsolateSandbox {
         let output = Command::new("isolate")
             .arg("--cg")
             .arg(format!("--box-id={}", box_id))
-            // .arg("--cg-dir=/sys/fs/cgroup/isolate")
             .arg("--init")
             .output()
             .await?;
@@ -427,7 +477,6 @@ impl IsolateSandbox {
         let output = Command::new("isolate")
             .arg("--cg")
             .arg(format!("--box-id={}", box_id))
-            //.arg("--cg-dir=/sys/fs/cgroup/isolate")
             .arg("--cleanup")
             .output()
             .await?;

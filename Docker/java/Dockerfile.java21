@@ -1,4 +1,0 @@
-FROM openjdk:21-slim
-WORKDIR /app
-COPY . .
-CMD ["sh", "-c", "echo \"$CODE\" > Main.java && javac Main.java && java Main"]
