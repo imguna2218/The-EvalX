@@ -1,12 +1,13 @@
 // src/sandbox/isolate.rs
 use anyhow::{anyhow, Result};
 use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use std::path::Path;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 pub struct CompilationResult {
     pub success: bool,
@@ -27,6 +28,9 @@ pub struct RunResult {
 
 pub struct IsolateSandbox;
 
+// CHANGED: Use u16 instead of u32 since we only need 0-999 range
+static BOX_ID_COUNTER: AtomicU16 = AtomicU16::new(0);
+
 impl IsolateSandbox {
     /// ADDED: Returns the time limit in seconds and memory limit in kilobytes for a given language.
     fn get_language_limits(language: &str) -> (u64, u64) {
@@ -39,16 +43,19 @@ impl IsolateSandbox {
         }
     }
     
-    // Generate a truly unique box ID using timestamp and counter
+    // FIXED: Generate box ID within Isolate's allowed range (0-999)
     fn generate_unique_box_id() -> String {
-        use std::process;
-        let pid = process::id();
+        let counter = BOX_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Isolate only allows box IDs from 0-999
+        // Use nanosecond timestamp to ensure uniqueness within the 0-999 range
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        // The box ID for isolate must be numeric. We combine pid and time and take the last few digits.
-        format!("{}", (pid as u128 + time) % 1000)
+        
+        // Combine timestamp with counter and modulo 1000 to stay within range
+        let box_id = (time % 1000 + counter as u128) % 1000;
+        format!("{}", box_id)
     }
 
     /// MODIFIED: Signature now only requires language and code. Limits are determined internally.
@@ -58,8 +65,25 @@ impl IsolateSandbox {
         code: &str,
     ) -> Result<CompilationResult> {
         let start_time = Instant::now();
-        let box_id = Self::generate_unique_box_id();
-        self.init_box(&box_id).await?;
+        
+        // FIXED: Add retry logic for box initialization with proper ID range
+        let mut retries = 0;
+        let max_retries = 5; // Increased retries for better reliability
+        let mut box_id = Self::generate_unique_box_id();
+
+        loop {
+            match self.init_box(&box_id).await {
+                Ok(()) => break,
+                Err(e) if retries < max_retries => {
+                    retries += 1;
+                    warn!("Failed to init box {}, retry {}/{}: {}", box_id, retries, max_retries, e);
+                    // Increase backoff time and generate new ID
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * retries as u64)).await;
+                    box_id = Self::generate_unique_box_id();
+                }
+                Err(e) => return Err(anyhow!("Failed to initialize sandbox after {} retries: {}", max_retries, e)),
+            }
+        }
 
         // MODIFIED: Getting limits from the new centralized function.
         let (time_limit_s, mem_limit_kb) = Self::get_language_limits(language);
@@ -263,8 +287,24 @@ impl IsolateSandbox {
         code_or_binary: &[u8],
         stdin: &str,
     ) -> Result<RunResult> {
-        let box_id = Self::generate_unique_box_id();
-        self.init_box(&box_id).await?;
+        // FIXED: Add retry logic for box initialization with proper ID range
+        let mut retries = 0;
+        let max_retries = 5; // Increased retries for better reliability
+        let mut box_id = Self::generate_unique_box_id();
+
+        loop {
+            match self.init_box(&box_id).await {
+                Ok(()) => break,
+                Err(e) if retries < max_retries => {
+                    retries += 1;
+                    warn!("Failed to init box {}, retry {}/{}: {}", box_id, retries, max_retries, e);
+                    // Increase backoff time and generate new ID
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * retries as u64)).await;
+                    box_id = Self::generate_unique_box_id();
+                }
+                Err(e) => return Err(anyhow!("Failed to initialize sandbox after {} retries: {}", max_retries, e)),
+            }
+        }
 
         // MODIFIED: Getting limits from the new centralized function.
         let (time_limit_s_u64, mem_limit_kb) = Self::get_language_limits(language);
@@ -337,11 +377,11 @@ impl IsolateSandbox {
         }
         fs::write(format!("{}/stdin.txt", box_path), stdin).await?;
 
-        let mut retries = 0;
-        while !Path::new(&box_path).exists() && retries < 10 {
+        let mut path_retries = 0;
+        while !Path::new(&box_path).exists() && path_retries < 10 {
             warn!("Box path {} not found, waiting...", box_path);
             sleep(Duration::from_millis(50)).await;
-            retries += 1;
+            path_retries += 1;
         }
         if !Path::new(&box_path).exists() {
             return Err(anyhow!("Box path not found after retries: {}", box_path));
@@ -496,9 +536,21 @@ impl IsolateSandbox {
             .arg("--cleanup")
             .output()
             .await?;
+        
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to cleanup isolate box {}: {}", box_id, stderr);
+            // Only log as error if it's not "box doesn't exist" error
+            if !stderr.contains("No such file or directory") && !stderr.contains("does not exist") {
+                error!("Failed to cleanup isolate box {}: {}", box_id, stderr);
+                // Force cleanup using system commands as fallback
+                let _ = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("rm -rf /var/local/lib/isolate/{} 2>/dev/null || true", box_id))
+                    .output()
+                    .await;
+            } else {
+                debug!("Box {} already cleaned up", box_id);
+            }
         }
         Ok(())
     }

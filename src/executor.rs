@@ -140,7 +140,7 @@ impl CodeExecutor {
                     return Ok(vec![error_result; requests.len()]);
                 }
                 artifact = compile_result.binary.unwrap();
-                redis_client.set_artifact_async(&artifact_key, &base_code, &artifact, 3600).await?;
+                redis_client.set_artifact_async(&artifact_key, &base_language, &base_code, &artifact).await?;
             }
         } else {
             artifact = base_code.as_bytes().to_vec();
@@ -182,7 +182,15 @@ impl CodeExecutor {
                     result
                 }
                 Err(e) => {
-                    EvaluationResult::error_result(format!("Execution failed: {}", e))
+                    let error_msg = e.to_string();
+                    // Check if it's a box conflict error and provide better message
+                    if error_msg.contains("currently in use by another process") {
+                        EvaluationResult::error_result("System busy: Execution resource temporarily unavailable".to_string())
+                    } else if error_msg.contains("No such file or directory") {
+                        EvaluationResult::error_result("System error: Execution environment not available".to_string())
+                    } else {
+                        EvaluationResult::error_result(format!("Execution failed: {}", error_msg))
+                    }
                 }
             }
         }).collect().await;

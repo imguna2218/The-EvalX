@@ -31,8 +31,9 @@ async fn main() -> Result<()> {
     let mode = args.get(1).map(String::as_str).unwrap_or("server");
 
     let (executor, tx, queue_manager) = initialize_executor().await?;
-    let redis_client =
-        RedisClient::new().map_err(|e| anyhow::anyhow!("Failed to initialize Redis: {}", e))?;
+    let redis_client = RedisClient::new()
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to initialize Redis pool: {}", e))?;
 
     if mode == "worker" {
         info!("Starting in WORKER mode");

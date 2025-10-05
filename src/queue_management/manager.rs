@@ -62,7 +62,7 @@ impl QueueManager {
         // ADDED: Increment the queue depth gauge for the specific language.
         QUEUE_DEPTH.with_label_values(&[&format!("{}:{}", language, version)]).inc();
 
-        let mut conn = redis_client.get_async_connection().await?;
+        let mut conn = redis_client.get_multiplexed_async_connection().await?;
 
         conn.set::<_, _, ()>(&format!("task:{}", &task_id), &serialized_task).await?;
         conn.set::<_, _, ()>(&status_key, "queued").await?;
@@ -78,11 +78,10 @@ impl QueueManager {
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
         loop {
-            let mut conn = match redis_client.get_async_connection().await {
+            let mut conn = match redis_client.get_multiplexed_async_connection().await {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to get Redis connection: {}", e);
-                    // MODIFIED: Increased sleep duration for more resilience.
+                    error!("Failed to get multiplexed Redis connection for worker: {}", e);
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }

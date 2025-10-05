@@ -24,7 +24,7 @@ pub async fn initialize_executor() -> Result<(
         .parse::<usize>()?;
     info!("Max concurrent Isolate sandboxes: {}", max_sandboxes);
 
-    let redis_client = RedisClient::new()?;
+    let redis_client = RedisClient::new().await?;
     // The new executor only needs a semaphore to control concurrency.
     let executor = Arc::new(CodeExecutor {
         semaphore: Arc::new(Semaphore::new(max_sandboxes)),
@@ -39,6 +39,13 @@ pub async fn initialize_executor() -> Result<(
         redis_client.clone(),
         tx.clone(),
     ));
+
+    // ADDED: Start the Redis memory monitor as a background task.
+    let monitor_client = redis_client.clone();
+    tokio::spawn(async move {
+        monitor_client.monitor_redis_memory().await;
+    });
+
     Ok((executor, tx, queue_manager))
 }
 

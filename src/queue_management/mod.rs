@@ -23,7 +23,7 @@ impl ExecutionQueue {
         let priority_key = format!("priority:{}:{}", language, version);
         let task_key = format!("task:{}", &task_id);
         let status_key = format!("status:{}", &task_id);
-        let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await.expect("Failed to get Redis connection");
         
         // Serialize task and log
         let serialized_task = serde_json::to_string(task).expect("Failed to serialize task");
@@ -46,7 +46,7 @@ impl ExecutionQueue {
     pub async fn dequeue(&self, language: &str, version: &str) -> Option<String> {
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
-        let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await.expect("Failed to get Redis connection");
         
         // Use BRPOP for blocking pop with 1-second timeout
         let result: Option<(String, String)> = conn.brpop(&queue_key, 1).await.expect("Failed to dequeue task");
@@ -64,7 +64,7 @@ impl ExecutionQueue {
         let priority_key = format!("priority:{}:{}", language, version);
         let task_key = format!("task:{}", task_id);
         let status_key = format!("status:{}", task_id);
-        let mut conn = self.redis_client.get_async_connection().await.expect("Failed to get Redis connection");
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await.expect("Failed to get Redis connection");
         
         // Remove from queue, priority set, task storage, and status
         conn.lrem::<_, _, ()>(&queue_key, 0, task_id).await.expect("Failed to remove task from queue");

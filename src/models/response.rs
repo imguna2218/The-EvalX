@@ -4,6 +4,8 @@ use serde::{Serialize, Deserialize};
 pub struct Artifact {
     pub code: String,
     pub binary: Vec<u8>,
+    /// ADDED: Flag to indicate if the binary is GZIP compressed.
+    pub compressed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

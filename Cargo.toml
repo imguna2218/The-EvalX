@@ -23,6 +23,8 @@ rand = "0.8.5"
 num_cpus = "1.16"
 sysinfo = "0.29"
 mobc = "0.8"
+mobc-redis = "0.8.0"
 async-trait = "0.1"
 prometheus = { version = "0.13", features = ["process"] }
 lazy_static = "1.4.0"
+flate2 = "1.0"
