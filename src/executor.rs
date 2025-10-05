@@ -3,7 +3,7 @@ use futures_util::future::join_all;
 use hex::ToHex;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use tokio::task;
 use tracing::{debug, error, info, warn};
 use crate::caching::redis_client::RedisClient;
@@ -13,6 +13,27 @@ use crate::sandbox::isolate::IsolateSandbox;
 use crate::types::index::CodeExecutor;
 
 impl CodeExecutor {
+
+    // warm up for java 
+    async fn warmup_java_environment(&self) -> Result<()> {
+        let warmup_code = r#"
+        public class Warmup {
+            public static void main(String[] args) {
+                System.out.println("Warmup completed");
+            }
+        }
+        "#.to_string();
+        
+        let sandbox = crate::sandbox::isolate::IsolateSandbox;
+        let result = sandbox.compile("java", &warmup_code, 5, 512 * 1024).await;
+        
+        match result {
+            Ok(_) => info!("Java environment warm-up completed successfully"),
+            Err(e) => warn!("Java warm-up failed: {}, but continuing...", e),
+        }
+        
+        Ok(())
+    }
     /// Executes a batch of requests using the high-speed Isolate sandbox.
     /// This is the sole, unified execution function for the entire application.
     pub async fn execute_batch(
@@ -29,6 +50,24 @@ impl CodeExecutor {
         let first_request = &requests[0];
         let base_language = first_request.language.as_ref().unwrap().trim().to_string();
         let base_code = first_request.code.as_ref().unwrap().trim().to_string();
+        
+        // Java warm-up system - trigger warm-up if Java and last warm-up was >2 minutes ago
+        if base_language.starts_with("java") {
+            let now = Instant::now();
+            let last_warmup = *self.last_java_warmup.read().unwrap();
+            if now.duration_since(last_warmup) > Duration::from_secs(120) {
+                info!("Triggering Java environment warm-up");
+                let executor_clone = self.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = executor_clone.warmup_java_environment().await {
+                        warn!("Background Java warm-up failed: {}", e);
+                    } else {
+                        *executor_clone.last_java_warmup.write().unwrap() = Instant::now();
+                    }
+                });
+            }
+        }
+        
         info!(
             "Executing Isolate batch for language: {}, with {} test cases",
             base_language,

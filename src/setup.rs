@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Semaphore};
 use tracing::{error, info};
-
+use std::time::Instant;
 use crate::caching::redis_client::RedisClient;
 use crate::queue_management::QueueManager;
 use crate::types::index::{CodeExecutor, ExecutionNotification};
@@ -29,6 +29,7 @@ pub async fn initialize_executor() -> Result<(
     // The new executor only needs a semaphore to control concurrency.
     let executor = Arc::new(CodeExecutor {
         semaphore: Arc::new(Semaphore::new(max_sandboxes)),
+        last_java_warmup: Arc::new(std::sync::RwLock::new(Instant::now())),
     });
 
     let (tx, _) = broadcast::channel::<ExecutionNotification>(1024);

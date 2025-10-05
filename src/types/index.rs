@@ -24,9 +24,13 @@ pub enum ExecutionType {
 /// MODIFIED: The CodeExecutor is now a very simple struct.
 /// Its only responsibility is to limit concurrency using a semaphore.
 /// All Docker-related fields and configurations have been removed.
+/// MODIFIED: The CodeExecutor is now a very simple struct.
+/// Its only responsibility is to limit concurrency using a semaphore.
+/// All Docker-related fields and configurations have been removed.
 #[derive(Debug, Clone)]
 pub struct CodeExecutor {
     pub semaphore: Arc<Semaphore>,
+    pub last_java_warmup: Arc<std::sync::RwLock<std::time::Instant>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

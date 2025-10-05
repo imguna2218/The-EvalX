@@ -71,6 +71,7 @@ impl IsolateSandbox {
             "java" | "java21" => {
                 let v = vec![
                     "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",
+                    "-J-XX:TieredStopAtLevel=1", // ADDED: Optimize for fast startup
                     "-J-Xms512m",
                     "-J-Xmx512m",
                     "-J-XX:MaxMetaspaceSize=192m",
@@ -90,6 +91,7 @@ impl IsolateSandbox {
             "java11" => {
                 let v = vec![
                     "/usr/lib/jvm/java-11-openjdk-amd64/bin/javac",
+                    "-J-XX:TieredStopAtLevel=1", // ADDED: Optimize for fast startup
                     "-J-Xms512m",
                     "-J-Xmx512m",
                     "-J-XX:MaxMetaspaceSize=192m",
@@ -148,7 +150,6 @@ impl IsolateSandbox {
             } else { // Assumes java21 for "java" or "java21"
                 std::env::var("JAVA21_CHROOT_PATH").unwrap_or_else(|_| "/opt/java21_chroot".to_string())
             };
-            // CORRECTED: Use '=' instead of ':' to map the directory path
             cmd.arg(format!("--dir={}={}", chroot_path, "/"));
             // Mount /etc for essential configs like resolv.conf as per the successful script
             cmd.arg("--dir=/etc");
@@ -349,7 +350,6 @@ impl IsolateSandbox {
             } else {
                 std::env::var("JAVA21_CHROOT_PATH").unwrap_or_else(|_| "/opt/java21_chroot".to_string())
             };
-            // CORRECTED: Use '=' instead of ':' to map the directory path
             cmd.arg(format!("--dir={}={}", chroot_path, "/"));
             cmd.arg("--dir=/etc");
         } else {
