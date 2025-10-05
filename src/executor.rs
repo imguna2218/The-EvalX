@@ -1,10 +1,10 @@
 use anyhow::Result;
-use futures_util::future::join_all;
+use futures_util::{stream, StreamExt};
 use hex::ToHex;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Instant, Duration};
-use tokio::task;
+use sysinfo::{SystemExt, System};
 use tracing::{debug, error, info, warn};
 use crate::caching::redis_client::RedisClient;
 use crate::models::request::ExecutionRequest;
@@ -25,7 +25,7 @@ impl CodeExecutor {
         "#.to_string();
         
         let sandbox = crate::sandbox::isolate::IsolateSandbox;
-        let result = sandbox.compile("java", &warmup_code, 5, 512 * 1024).await;
+        let result = sandbox.compile("java", &warmup_code).await;
         
         match result {
             Ok(_) => info!("Java environment warm-up completed successfully"),
@@ -34,6 +34,44 @@ impl CodeExecutor {
         
         Ok(())
     }
+
+    /// ADDED: Calculates the optimal number of parallel tasks for a batch.
+    /// It sets limits based on language and applies progressive backoff if memory is high.
+    async fn calculate_optimal_concurrency(&self, language: &str, batch_size: usize) -> usize {
+        // Base limits tuned for a dedicated deployment system.
+        let base_limit = match language {
+            "java" | "java11" | "java21" => 10,
+            "c" | "cpp" => 20,
+            "python" | "javascript" => 15,
+            _ => 10, // A conservative default for any other language.
+        };
+        let limit = base_limit.min(batch_size);
+
+        // Progressive Backoff: Check system memory usage.
+        let mut sys = self.system.lock().await;
+        sys.refresh_memory();
+        let total_mem = sys.total_memory();
+        let used_mem = sys.used_memory();
+        
+        // Ensure total_mem is not zero to avoid division by zero.
+        if total_mem == 0 {
+            return limit;
+        }
+
+        let mem_usage_percent = (used_mem as f64 / total_mem as f64) * 100.0;
+
+        if mem_usage_percent > 80.0 {
+            warn!(
+                "High memory usage ({:.2}%) detected. Reducing batch concurrency.",
+                mem_usage_percent
+            );
+            // Reduce concurrency by half, but ensure at least 1 task runs.
+            (limit / 2).max(1)
+        } else {
+            limit
+        }
+    }
+
     /// Executes a batch of requests using the high-speed Isolate sandbox.
     /// This is the sole, unified execution function for the entire application.
     pub async fn execute_batch(
@@ -74,8 +112,6 @@ impl CodeExecutor {
             requests.len()
         );
         let is_compiled = matches!(base_language.as_str(), "c" | "cpp" | "java" | "java11" | "java21");
-        let timeout_s = first_request.timeout.unwrap_or(10) as f64;
-        let memory_limit_kb = 256 * 1024; // Default 256MB
         let sandbox = IsolateSandbox;
         let mut compile_time = 0.0;
         let artifact: Vec<u8>;
@@ -89,7 +125,7 @@ impl CodeExecutor {
             } else {
                 debug!("Compiling code with Isolate for language: {}", base_language);
                 let compile_result = sandbox
-                 .compile(&base_language, &base_code, 10, 512 * 1024)
+                 .compile(&base_language, &base_code)
                  .await?;
                 compile_time = compile_result.compile_time;
                 if!compile_result.success {
@@ -111,51 +147,46 @@ impl CodeExecutor {
         }
 
         let shared_artifact = Arc::new(artifact);
-        let mut tasks = Vec::new();
-        for request in requests {
+        
+        // MODIFIED: Intelligent Concurrency Control
+        let concurrency_limit = self.calculate_optimal_concurrency(&base_language, requests.len()).await;
+        info!("Running batch with concurrency limit of {}", concurrency_limit);
+
+        let results_stream = stream::iter(requests).map(|request| {
             let lang_clone = base_language.clone();
             let artifact_clone = Arc::clone(&shared_artifact);
-            let task = task::spawn(async move {
+            
+            async move {
                 let sandbox = IsolateSandbox;
-                let run_result = sandbox
-                 .run(
-                        &lang_clone,
-                        &artifact_clone,
-                        &request.stdin,
-                        timeout_s,
-                        memory_limit_kb,
-                    )
-                 .await?;
-                Ok::<_, anyhow::Error>(EvaluationResult {
-                    compile_time: 0.0,
-                    stdout: run_result.stdout,
-                    stderr: if run_result.stderr.is_empty() { None } else { Some(run_result.stderr) },
-                    exit_code: run_result.exit_code,
-                    run_time: run_result.run_time,
-                    space_consumed: format!("{} KB", run_result.memory_used_kb),
-                })
-            });
-            tasks.push(task);
-        }
+                match sandbox.run(&lang_clone, &artifact_clone, &request.stdin).await {
+                    Ok(run_result) => Ok(EvaluationResult {
+                        compile_time: 0.0, // This will be set later
+                        stdout: run_result.stdout,
+                        stderr: if run_result.stderr.is_empty() { None } else { Some(run_result.stderr) },
+                        exit_code: run_result.exit_code,
+                        run_time: run_result.run_time,
+                        space_consumed: format!("{} KB", run_result.memory_used_kb),
+                    }),
+                    Err(e) => {
+                        error!("Isolate task execution failed: {}", e);
+                        Err(e)
+                    }
+                }
+            }
+        }).buffer_unordered(concurrency_limit);
 
-        let results: Vec<EvaluationResult> = join_all(tasks)
-         .await
-         .into_iter()
-         .map(|res| match res {
-                Ok(Ok(mut result)) => {
+        let results: Vec<EvaluationResult> = results_stream.map(|res| {
+            match res {
+                Ok(mut result) => {
                     result.compile_time = compile_time;
                     result
                 }
-                Ok(Err(e)) => {
-                    error!("Isolate task execution failed: {}", e);
+                Err(e) => {
                     EvaluationResult::error_result(format!("Execution failed: {}", e))
                 }
-                Err(e) => {
-                    error!("Isolate task panicked: {}", e);
-                    EvaluationResult::error_result(format!("Task panic: {}", e))
-                }
-            })
-         .collect();
+            }
+        }).collect().await;
+
 
         if let Some(token) = token {
             let result_key = format!("result:{}", token);

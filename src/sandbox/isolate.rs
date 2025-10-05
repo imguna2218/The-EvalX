@@ -28,6 +28,17 @@ pub struct RunResult {
 pub struct IsolateSandbox;
 
 impl IsolateSandbox {
+    /// ADDED: Returns the time limit in seconds and memory limit in kilobytes for a given language.
+    fn get_language_limits(language: &str) -> (u64, u64) {
+        const MB: u64 = 1024;
+        match language {
+            "java" | "java11" | "java21" => (8, 512 * MB),
+            "c" | "cpp" => (10, 256 * MB),
+            "python" | "javascript" => (5, 128 * MB),
+            _ => (10, 256 * MB), // A sensible default for other potential languages
+        }
+    }
+    
     // Generate a truly unique box ID using timestamp and counter
     fn generate_unique_box_id() -> String {
         use std::process;
@@ -40,16 +51,18 @@ impl IsolateSandbox {
         format!("{}", (pid as u128 + time) % 1000)
     }
 
+    /// MODIFIED: Signature now only requires language and code. Limits are determined internally.
     pub async fn compile(
         &self,
         language: &str,
         code: &str,
-        time_limit_s: u64,
-        mem_limit_kb: u64,
     ) -> Result<CompilationResult> {
         let start_time = Instant::now();
         let box_id = Self::generate_unique_box_id();
         self.init_box(&box_id).await?;
+
+        // MODIFIED: Getting limits from the new centralized function.
+        let (time_limit_s, mem_limit_kb) = Self::get_language_limits(language);
 
         let (source_filename, executable_filename, compile_command, java_home, node_path, python_path) = match language {
             "c" => (
@@ -71,7 +84,7 @@ impl IsolateSandbox {
             "java" | "java21" => {
                 let v = vec![
                     "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",
-                    "-J-XX:TieredStopAtLevel=1", // ADDED: Optimize for fast startup
+                    "-J-XX:TieredStopAtLevel=1",
                     "-J-Xms512m",
                     "-J-Xmx512m",
                     "-J-XX:MaxMetaspaceSize=192m",
@@ -91,7 +104,7 @@ impl IsolateSandbox {
             "java11" => {
                 let v = vec![
                     "/usr/lib/jvm/java-11-openjdk-amd64/bin/javac",
-                    "-J-XX:TieredStopAtLevel=1", // ADDED: Optimize for fast startup
+                    "-J-XX:TieredStopAtLevel=1",
                     "-J-Xms512m",
                     "-J-Xmx512m",
                     "-J-XX:MaxMetaspaceSize=192m",
@@ -243,16 +256,19 @@ impl IsolateSandbox {
         Ok(result)
     }
 
+    /// MODIFIED: Signature now only requires language, binary, and stdin. Limits are determined internally.
     pub async fn run(
         &self,
         language: &str,
         code_or_binary: &[u8],
         stdin: &str,
-        time_limit_s: f64,
-        mem_limit_kb: u64,
     ) -> Result<RunResult> {
         let box_id = Self::generate_unique_box_id();
         self.init_box(&box_id).await?;
+
+        // MODIFIED: Getting limits from the new centralized function.
+        let (time_limit_s_u64, mem_limit_kb) = Self::get_language_limits(language);
+        let time_limit_s = time_limit_s_u64 as f64;
 
         let (filename_to_write, run_command, java_home, node_path, python_path) = match language {
             "c" | "cpp" => (

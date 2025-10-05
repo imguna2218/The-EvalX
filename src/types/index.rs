@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{broadcast, Semaphore, Mutex};
 // MODIFIED: All obsolete imports related to Docker and the old executor have been removed.
 use crate::models::response::EvaluationResult;
+use sysinfo::System;
 
 // NOTE: This struct is part of the old queuing model and will be replaced by Broccoli.
 // It is kept for now to ensure compatibility with the current queue manager.
@@ -27,10 +28,12 @@ pub enum ExecutionType {
 /// MODIFIED: The CodeExecutor is now a very simple struct.
 /// Its only responsibility is to limit concurrency using a semaphore.
 /// All Docker-related fields and configurations have been removed.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CodeExecutor {
     pub semaphore: Arc<Semaphore>,
     pub last_java_warmup: Arc<std::sync::RwLock<std::time::Instant>>,
+    /// ADDED: System handle for monitoring memory usage for progressive backoff.
+    pub system: Arc<Mutex<System>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
