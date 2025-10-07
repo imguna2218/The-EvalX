@@ -1,12 +1,12 @@
 use anyhow::Result;
 use std::env;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Semaphore, Mutex};
+use tokio::sync::{broadcast, Semaphore, Mutex, RwLock}; // MODIFIED: Imported tokio's RwLock
 use tracing::{error, info};
 use std::time::Instant;
 use crate::caching::redis_client::RedisClient;
 use crate::queue_management::QueueManager;
-use crate::types::index::{CodeExecutor, ExecutionNotification};
+use crate::types::index::{CodeExecutor, ExecutionNotification, ConcurrencyState};
 use sysinfo::{System, SystemExt};
 
 /// MODIFIED: This function is now much simpler.
@@ -25,12 +25,19 @@ pub async fn initialize_executor() -> Result<(
     info!("Max concurrent Isolate sandboxes: {}", max_sandboxes);
 
     let redis_client = RedisClient::new().await?;
-    // The new executor only needs a semaphore to control concurrency.
+    // MODIFIED: The executor is initialized with the new fields required for adaptive concurrency.
     let executor = Arc::new(CodeExecutor {
         semaphore: Arc::new(Semaphore::new(max_sandboxes)),
-        last_java_warmup: Arc::new(std::sync::RwLock::new(Instant::now())),
-        // MODIFIED: Initialize the system monitor.
+        // MODIFIED: Use tokio's RwLock for initialization
+        last_java_warmup: Arc::new(RwLock::new(Instant::now())),
         system: Arc::new(Mutex::new(System::new_all())),
+        // ADDED: Pass the Redis client to the executor.
+        redis_client: redis_client.clone(),
+        // MODIFIED: Use tokio's RwLock for initialization
+        concurrency_state: Arc::new(RwLock::new((
+            ConcurrencyState::Nominal,
+            Instant::now(),
+        ))),
     });
     let (tx, _) = broadcast::channel::<ExecutionNotification>(1024);
     let tx = Arc::new(tx);
@@ -39,13 +46,11 @@ pub async fn initialize_executor() -> Result<(
         redis_client.clone(),
         tx.clone(),
     ));
-
     // ADDED: Start the Redis memory monitor as a background task.
     let monitor_client = redis_client.clone();
     tokio::spawn(async move {
         monitor_client.monitor_redis_memory().await;
     });
-
     Ok((executor, tx, queue_manager))
 }
 

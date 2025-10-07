@@ -7,6 +7,10 @@ pub struct ExecutionTask {
     pub requests: Vec<ExecutionRequest>,
     pub execution_type: ExecutionType,
     pub user_id: Option<String>,
+    /// ADDED: Unix timestamp (seconds) of when the task was created.
+    pub created_at: u64,
+    /// ADDED: Tracks the number of times this task has been attempted.
+    pub retry_count: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

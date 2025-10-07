@@ -87,16 +87,28 @@ impl RedisClient {
 
     // --- Asynchronous Methods (Non-Blocking) ---
 
-    pub async fn get_from_cache_async<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Result<Option<T>> {
+    pub async fn get_from_cache_async<T: for<'de> Deserialize<'de>>(&self, key: &str, language: Option<&str>) -> Result<Option<T>> {
         let mut conn = self.get_conn().await?;
         let value: Option<String> = conn.get(key).await?;
         match value {
             Some(val) => {
                 let _: () = conn.incr("evalx:cache:hits", 1).await?;
+                // ADDED: Track cache hits per language
+                if let Some(lang) = language {
+                    crate::monitoring::metrics::CACHE_HITS_TOTAL
+                        .with_label_values(&[lang])
+                        .inc();
+                }
                 Ok(Some(serde_json::from_str(&val)?))
             },
             None => {
                 let _: () = conn.incr("evalx:cache:misses", 1).await?;
+                // ADDED: Track cache misses per language
+                if let Some(lang) = language {
+                    crate::monitoring::metrics::CACHE_MISSES_TOTAL
+                        .with_label_values(&[lang])
+                        .inc();
+                }
                 Ok(None)
             },
         }
@@ -110,12 +122,18 @@ impl RedisClient {
     }
 
     /// MODIFIED: Now updates the access time for the artifact on cache hit.
-    pub async fn get_artifact_async(&self, key: &str) -> Result<Option<Artifact>> {
+        /// MODIFIED: Now updates the access time for the artifact on cache hit.
+    pub async fn get_artifact_async(&self, key: &str, language: &str) -> Result<Option<Artifact>> {
         let mut conn = self.get_conn().await?;
         let value: Option<String> = conn.get(key).await?;
         match value {
             Some(val) => {
                 let _: () = conn.incr("evalx:cache:hits", 1).await?;
+                // ADDED: Track cache hits per language for artifacts
+                crate::monitoring::metrics::CACHE_HITS_TOTAL
+                    .with_label_values(&[language])
+                    .inc();
+                
                 let mut artifact: Artifact = serde_json::from_str(&val)?;
                 
                 // ADDED: Update the last-accessed time for this artifact.
@@ -132,6 +150,10 @@ impl RedisClient {
             },
             None => {
                 let _: () = conn.incr("evalx:cache:misses", 1).await?;
+                // ADDED: Track cache misses per language for artifacts
+                crate::monitoring::metrics::CACHE_MISSES_TOTAL
+                    .with_label_values(&[language])
+                    .inc();
                 Ok(None)
             },
         }

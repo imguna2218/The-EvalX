@@ -34,7 +34,7 @@ pub async fn handle_execute(
     let code = request.code.as_ref().unwrap_or(&"".to_string()).to_string();
     let stdin = request.stdin.clone();
     let timeout = request.timeout.unwrap_or(10);
-
+    
     let cache_key = format!(
         "evalx:exec:{}:{}:{}:{}:{}",
         language,
@@ -45,7 +45,7 @@ pub async fn handle_execute(
     );
 
     // Using a block to scope the mutable redis_client
-    if let Ok(Some(cached_result)) = redis_client.get_from_cache_async(&cache_key).await {
+    if let Ok(Some(cached_result)) = redis_client.get_from_cache_async(&cache_key, Some(&language)).await {
         debug!("Single execution cache hit for key: {}", cache_key);
         return AppResponse(Ok(SubmissionResponse {
             token: "cached".to_string(),
@@ -58,6 +58,7 @@ pub async fn handle_execute(
     // The single request is wrapped in a vector and queued as a batch.
     // This unifies the execution pipeline for maximum code reuse and simplicity.
     info!("Queuing single request as a batch of one.");
+    
     match queue_manager
         .add_task(vec![request.clone()], ExecutionType::Batch, 1, redis_client)
         .await
@@ -68,6 +69,7 @@ pub async fn handle_execute(
                 status: "queued".to_string(),
                 results: None,
             });
+            
             AppResponse(Ok(SubmissionResponse {
                 token: task_id,
                 status: SubmissionStatus::Queued,
@@ -114,6 +116,7 @@ pub async fn handle_execute_batch(
         req.language = Some(req.language.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| base_language.clone()));
         // Note: version is less critical for Isolate but good practice to keep consistent.
         req.version = Some(req.version.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| base_version.clone()));
+        
         if req.code.as_ref().map_or(true, |s| s.trim().is_empty()) {
             req.code = Some(base_code.clone());
             warn!("Propagated code to incomplete request at index {}", index);
@@ -139,6 +142,7 @@ pub async fn handle_execute_batch(
                 status: "queued".to_string(),
                 results: None,
             });
+            
             AppResponse(Ok(SubmissionResponse {
                 token: task_id,
                 status: SubmissionStatus::Queued,
@@ -162,7 +166,8 @@ pub async fn handle_submission_status(
     let result_key = format!("result:{}", token);
     let status_key = format!("status:{}", token);
 
-    match redis_client.get_from_cache_async::<Vec<EvaluationResult>>(&result_key).await {
+    // FIXED: Added the missing `None` argument.
+    match redis_client.get_from_cache_async::<Vec<EvaluationResult>>(&result_key, None).await {
         Ok(Some(results)) => {
             debug!("Found completed results for token: {}", token);
             AppResponse(Ok(SubmissionResponse {
@@ -172,7 +177,8 @@ pub async fn handle_submission_status(
             }))
         }
         Ok(None) => {
-            match redis_client.get_from_cache_async::<String>(&status_key).await {
+            // FIXED: Added the missing `None` argument.
+            match redis_client.get_from_cache_async::<String>(&status_key, None).await {
                 Ok(Some(status)) if status == "processing" => {
                     debug!("Task is processing for token: {}", token);
                     AppResponse(Ok(SubmissionResponse {

@@ -3,7 +3,6 @@ services:
     image: redis:7.0-alpine
     container_name: evalx_redis
     restart: unless-stopped
-    user: "root"
     ports:
       - "6379:6379"
     volumes:
@@ -11,11 +10,52 @@ services:
       - redis-data:/data
     networks:
       - evalx-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: evalx_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      # ADDED: Mount the new rule file for defining alerts.
+      - ./prometheus.rules.yml:/etc/prometheus/prometheus.rules.yml
+    # This allows the container to connect back to the host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - evalx-network
+    depends_on:
+      - alertmanager
+
+  # ADDED: The Alertmanager service receives alerts from Prometheus.
+  alertmanager:
+    image: prom/alertmanager:v0.25.0
+    container_name: evalx_alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    networks:
+      - evalx-network
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: evalx_grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000" # Access Grafana on localhost:3001
+    volumes:
+      # ADDED: These volumes enable Grafana's automatic dashboard provisioning.
+      # It will automatically find and load any dashboards placed in the ./grafana/dashboards directory.
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+    networks:
+      - evalx-network
+    depends_on:
+      - prometheus
 
 networks:
   evalx-network:

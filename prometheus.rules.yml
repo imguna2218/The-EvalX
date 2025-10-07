@@ -1,0 +1,24 @@
+groups:
+  - name: evalx_rules
+    rules:
+      - alert: HighJavaExecutionLatency
+        expr: histogram_quantile(0.95, sum(rate(evalx_execution_time_seconds_bucket{language=~"java.*"}[5m])) by (le)) > 1.0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Java Execution Latency"
+          description: "The 95th percentile for Java execution time has been above 1.0s for the last 2 minutes."
+
+      - alert: LowCacheHitRate
+        expr: (sum(rate(evalx_cache_hits_total[5m])) / (sum(rate(evalx_cache_hits_total[5m])) + sum(rate(evalx_cache_misses_total[5m])))) * 100 < 60
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Low Cache Hit Rate"
+          description: "The overall cache hit rate has dropped below 60% for the last 5 minutes."
+
+      # NOTE: An alert for Redis memory usage would typically require a dedicated "Redis Exporter"
+      # container to expose Redis's internal metrics to Prometheus. This is a common and
+      # recommended addition for a full production setup.

@@ -1,21 +1,22 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::queue_management::{ExecutionQueue, ExecutionTask, ExecutionType};
+use crate::queue_management::{ExecutionTask, ExecutionType};
 use crate::types::index::{CodeExecutor, ExecutionNotification};
 use crate::caching::redis_client::RedisClient;
 use crate::models::request::ExecutionRequest;
 use crate::models::response::{EvaluationResult, SubmissionStatus};
 use anyhow::Result;
 use uuid::Uuid;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use redis::AsyncCommands;
+use std::env;
 use tokio::sync::broadcast;
 // ADDED: Import the prometheus metric for queue depth.
 use crate::monitoring::metrics::QUEUE_DEPTH;
 
 #[derive(Clone)]
 pub struct QueueManager {
-    queue: ExecutionQueue,
+    queue: crate::queue_management::ExecutionQueue,
     tasks: Arc<RwLock<std::collections::HashMap<String, ExecutionTask>>>,
     executor: Arc<CodeExecutor>,
     redis_client: RedisClient,
@@ -25,7 +26,7 @@ pub struct QueueManager {
 impl QueueManager {
     pub fn new(executor: Arc<CodeExecutor>, redis_client: RedisClient, notification_tx: Arc<broadcast::Sender<ExecutionNotification>>) -> Self {
         QueueManager {
-            queue: ExecutionQueue::new(redis_client.clone()),
+            queue: crate::queue_management::ExecutionQueue::new(redis_client.clone()),
             tasks: Arc::new(RwLock::new(std::collections::HashMap::new())),
             executor,
             redis_client,
@@ -48,12 +49,17 @@ impl QueueManager {
         let language = first_request.language.as_ref().unwrap_or(&"".to_string()).trim().to_string();
         let version = first_request.version.as_ref().unwrap_or(&"".to_string()).trim().to_string();
         let task_id = Uuid::new_v4().to_string();
+        
+        // MODIFIED: Initialize the `created_at` and `retry_count` fields.
         let task = ExecutionTask {
             id: task_id.clone(),
             requests,
             execution_type,
             user_id: None,
+            created_at: std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)?.as_secs(),
+            retry_count: 0, // Initialize retry count for a new task.
         };
+
         let serialized_task = serde_json::to_string(&task)?;
         let queue_key = format!("queue:{}:{}", language, version);
         let priority_key = format!("priority:{}:{}", language, version);
@@ -75,8 +81,14 @@ impl QueueManager {
 
     pub async fn start_worker(&self, language: String, version: String, redis_client: RedisClient) -> Result<(), anyhow::Error> {
         info!("Starting worker for language: {}, version: {}", language, version);
-        let queue_key = format!("queue:{}:{}", language, version);
-        let priority_key = format!("priority:{}:{}", language, version);
+        let language_version = format!("{}:{}", language, version);
+        let queue_key = format!("queue:{}", language_version);
+        let priority_key = format!("priority:{}", language_version);
+        
+        // MODIFIED: Load configuration from environment variables once.
+        let max_retries: u8 = env::var("MAX_RETRIES").unwrap_or_else(|_| "3".to_string()).parse()?;
+        let dlq_name = env::var("DEAD_LETTER_QUEUE_NAME").unwrap_or_else(|_| "evalx:dead_letter_queue".to_string());
+
         loop {
             let mut conn = match redis_client.get_multiplexed_async_connection().await {
                 Ok(c) => c,
@@ -86,21 +98,22 @@ impl QueueManager {
                     continue;
                 }
             };
+            
             let result: Option<(String, String)> = match conn.brpop(&queue_key, 1).await {
                 Ok(res) => res,
                 Err(e) => {
                     error!("Failed to dequeue task: {}", e);
-                    // MODIFIED: Increased sleep duration for more resilience.
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
             };
+            
             if let Some((_, task_id)) = result {
-                // ADDED: Decrement the queue depth gauge for the specific language.
-                QUEUE_DEPTH.with_label_values(&[&format!("{}:{}", language, version)]).dec();
+                QUEUE_DEPTH.with_label_values(&[&language_version]).dec();
 
                 info!("Dequeued task: {}, language: {}, version: {}", task_id, language, version);
                 let status_key = format!("status:{}", &task_id);
+                
                 if let Err(e) = conn.zrem::<_, _, ()>(&priority_key, &task_id).await {
                     error!("Failed to remove task {} from priority set: {}", task_id, e);
                     conn.set::<_, _, ()>(&status_key, "failed").await.unwrap_or_else(|e| error!("Failed to set status to failed for task {}: {}", task_id, e));
@@ -116,8 +129,9 @@ impl QueueManager {
                         continue;
                     }
                 };
+                
                 if let Some(serialized_task) = serialized_task {
-                    let task: ExecutionTask = match serde_json::from_str::<ExecutionTask>(&serialized_task) {
+                    let mut task: ExecutionTask = match serde_json::from_str::<ExecutionTask>(&serialized_task) {
                         Ok(t) => t,
                         Err(e) => {
                             error!("Failed to deserialize task {}: {}", task_id, e);
@@ -126,14 +140,22 @@ impl QueueManager {
                             continue;
                         }
                     };
+                    
+                    // CORRECTED: Calculate and record queue wait time using the task's timestamp.
+                    let now_unix = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)?.as_secs();
+                    let wait_time = now_unix.saturating_sub(task.created_at);
+                    crate::monitoring::metrics::QUEUE_WAIT_TIME_SECONDS.with_label_values(&[&language_version]).observe(wait_time as f64);
+
                     if let Err(e) = conn.set::<_, _, ()>(&status_key, "processing").await {
                         error!("Failed to set status to processing for task {}: {}", task_id, e);
                         continue;
                     }
+
                     self.notify_completion(&task_id, &vec![], SubmissionStatus::Processing);
                     let executor_clone = self.executor.clone();
                     let result_key = format!("result:{}", &task_id);
-                    match executor_clone.execute_batch(task.requests, redis_client.clone(), Some(task_id.clone())).await {
+                    
+                    match executor_clone.execute_batch(task.requests.clone(), redis_client.clone(), Some(task_id.clone())).await {
                         Ok(results) => {
                             let serialized_results = serde_json::to_string(&results)?;
                             conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
@@ -143,19 +165,45 @@ impl QueueManager {
                             self.notify_completion(&task_id, &results, SubmissionStatus::Completed);
                         }
                         Err(e) => {
-                            error!("Execution failed for task {}: {}", task_id, e);
-                            let error_result = vec![EvaluationResult::error_result(format!("Execution failed: {}", e))];
-                            let serialized_results = serde_json::to_string(&error_result)?;
-                            conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
-                            if let Err(e) = conn.set::<_, _, ()>(&status_key, "failed").await {
-                                error!("Failed to set status to failed for task {}: {}", task_id, e);
+                            // MODIFIED: Retry and Dead Letter Queue Logic
+                            error!("Execution failed for task {}: {}. Retry {}/{}", task_id, e, task.retry_count + 1, max_retries);
+                            task.retry_count += 1;
+
+                            if task.retry_count >= max_retries {
+                                warn!("Task {} failed after {} retries. Moving to Dead Letter Queue.", task_id, max_retries);
+                                let error_result = vec![EvaluationResult::error_result(format!("Execution failed after {} retries: {}", max_retries, e))];
+                                let serialized_results = serde_json::to_string(&error_result)?;
+                                conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
+                                if let Err(e) = conn.set::<_, _, ()>(&status_key, "failed").await {
+                                    error!("Failed to set status to failed for task {}: {}", task_id, e);
+                                }
+                                
+                                // Move to DLQ
+                                let failed_task_payload = serde_json::to_string(&task).unwrap_or_default();
+                                conn.lpush(&dlq_name, failed_task_payload).await?;
+
+                                self.notify_completion(&task_id, &error_result, SubmissionStatus::Failed);
+                            } else {
+                                // Re-queue the task for another attempt.
+                                warn!("Re-queuing task {} for retry.", task_id);
+                                let updated_task_payload = serde_json::to_string(&task)?;
+                                conn.set(&task_key, updated_task_payload).await?;
+                                // Re-add to the original queue
+                                conn.lpush(&queue_key, &task_id).await?;
+                                conn.zadd(&priority_key, &task_id, 1).await?; // Re-queue with normal priority
+                                // No notification, it's still "processing" from the user's perspective.
                             }
-                            self.notify_completion(&task_id, &error_result, SubmissionStatus::Failed);
                         }
                     }
 
-                    if let Err(e) = conn.del::<_, ()>(&task_key).await {
-                        error!("Failed to delete task {}: {}", task_id, e);
+                    // MODIFIED: Only delete the task key if the task was successful or moved to DLQ.
+                    // If it's being retried, the task data must remain.
+                    if let Ok(status) = conn.get::<_, String>(&status_key).await {
+                        if status == "completed" || status == "failed" {
+                             if let Err(e) = conn.del::<_, ()>(&task_key).await {
+                                error!("Failed to delete task {}: {}", task_id, e);
+                            }
+                        }
                     }
                 } else {
                     error!("Task {} not found in Redis", task_id);

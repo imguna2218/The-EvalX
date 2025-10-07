@@ -40,4 +40,31 @@ lazy_static! {
         "The total number of cache hits and misses.",
         &["event_type"] // "hit" or "miss"
     ).unwrap();
+
+    // ADDED: Language-specific performance metrics
+    pub static ref EXECUTION_TIME_SECONDS: HistogramVec = register_histogram_vec!(
+        "evalx_execution_time_seconds",
+        "The code execution time in seconds per language.",
+        &["language"],
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    ).unwrap();
+
+    pub static ref CACHE_HITS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "evalx_cache_hits_total",
+        "Total number of cache hits per language.",
+        &["language"]
+    ).unwrap();
+
+    pub static ref CACHE_MISSES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "evalx_cache_misses_total",
+        "Total number of cache misses per language.",
+        &["language"]
+    ).unwrap();
+
+    pub static ref QUEUE_WAIT_TIME_SECONDS: HistogramVec = register_histogram_vec!(
+        "evalx_queue_wait_time_seconds",
+        "Time spent in queue before execution per language.",
+        &["language"],
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
+    ).unwrap();
 }
