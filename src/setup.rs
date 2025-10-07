@@ -1,44 +1,46 @@
 use anyhow::Result;
 use std::env;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Semaphore, Mutex, RwLock}; // MODIFIED: Imported tokio's RwLock
+use tokio::sync::{broadcast, Semaphore, Mutex, RwLock};
 use tracing::{error, info};
 use std::time::Instant;
 use crate::caching::redis_client::RedisClient;
 use crate::queue_management::QueueManager;
 use crate::types::index::{CodeExecutor, ExecutionNotification, ConcurrencyState};
 use sysinfo::{System, SystemExt};
+// ADDED: Import the new LanguageRegistry
+use crate::languages::manager::LanguageRegistry;
 
-/// MODIFIED: This function is now much simpler.
-/// It no longer needs to connect to Docker or read complex language configs.
-/// It only initializes the shared state, including the new lean CodeExecutor.
 pub async fn initialize_executor() -> Result<(
     Arc<CodeExecutor>,
     Arc<broadcast::Sender<ExecutionNotification>>,
     Arc<QueueManager>,
 )> {
     dotenv::dotenv().ok();
-    // This variable now controls the number of concurrent Isolate sandboxes, not Docker containers.
+    
+    // ADDED: Initialize the language registry from config files at startup.
+    let language_registry = Arc::new(LanguageRegistry::new()?);
+
     let max_sandboxes = env::var("MAX_CONCURRENT_SANDBOXES")
         .unwrap_or_else(|_| "500".to_string())
         .parse::<usize>()?;
     info!("Max concurrent Isolate sandboxes: {}", max_sandboxes);
 
     let redis_client = RedisClient::new().await?;
-    // MODIFIED: The executor is initialized with the new fields required for adaptive concurrency.
+    
     let executor = Arc::new(CodeExecutor {
         semaphore: Arc::new(Semaphore::new(max_sandboxes)),
-        // MODIFIED: Use tokio's RwLock for initialization
         last_java_warmup: Arc::new(RwLock::new(Instant::now())),
         system: Arc::new(Mutex::new(System::new_all())),
-        // ADDED: Pass the Redis client to the executor.
         redis_client: redis_client.clone(),
-        // MODIFIED: Use tokio's RwLock for initialization
         concurrency_state: Arc::new(RwLock::new((
             ConcurrencyState::Nominal,
             Instant::now(),
         ))),
+        // ADDED: Pass the initialized registry to the executor.
+        language_registry,
     });
+    
     let (tx, _) = broadcast::channel::<ExecutionNotification>(1024);
     let tx = Arc::new(tx);
     let queue_manager = Arc::new(QueueManager::new(
@@ -46,33 +48,36 @@ pub async fn initialize_executor() -> Result<(
         redis_client.clone(),
         tx.clone(),
     ));
-    // ADDED: Start the Redis memory monitor as a background task.
+
     let monitor_client = redis_client.clone();
     tokio::spawn(async move {
         monitor_client.monitor_redis_memory().await;
     });
+    
     Ok((executor, tx, queue_manager))
 }
 
-/// Starts the background workers that process tasks from the queue.
-pub async fn start_workers(queue_manager: Arc<QueueManager>, redis_client: RedisClient) {
-    // MODIFIED: The list of languages is now specific, matching the language/version
-    // strings that the API will receive from clients.
-    // This ensures workers listen
-    // on the correct queues (e.g., "queue:java11:11").
-    let languages = vec![
-        ("python".to_string(), "3.9".to_string()),
-        ("java".to_string(), "21".to_string()),
-        ("java11".to_string(), "11".to_string()),
-        ("c".to_string(), "11".to_string()),
-        ("cpp".to_string(), "11".to_string()),
-        ("javascript".to_string(), "18".to_string()),
-    ];
-    for (language, version) in languages {
+/// MODIFIED: This function now dynamically starts workers based on loaded configurations.
+pub async fn start_workers(
+    queue_manager: Arc<QueueManager>,
+    redis_client: RedisClient,
+    language_registry: Arc<LanguageRegistry> // ADDED: Pass the registry to the workers setup.
+) {
+    // MODIFIED: The list of languages is now retrieved dynamically from the registry.
+    let languages = language_registry.list_all();
+    
+    if languages.is_empty() {
+        error!("No language configurations were loaded. No workers will be started.");
+        return;
+    }
+
+    for lang_config in languages {
         let queue_manager_clone = queue_manager.clone();
-        let language_clone = language.clone();
-        let version_clone = version.clone();
+        // MODIFIED: Get language and version from the config struct.
+        let language_clone = lang_config.name.clone();
+        let version_clone = lang_config.version.clone();
         let redis_client_clone = redis_client.clone();
+        
         tokio::spawn(async move {
             info!(
                 "Worker spawned for language: {}, version: {}",

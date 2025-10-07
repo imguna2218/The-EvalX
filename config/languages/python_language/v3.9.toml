@@ -1,0 +1,15 @@
+is_compiled = false
+source_filename = "main.py"
+executable_filename = "main.py"
+env_vars = { PYTHONPATH = "/usr/lib/python3.10" }
+
+[compile]
+command = ["echo", "no-compile"]
+
+[run]
+command = ["/usr/bin/python3", "main.py"]
+
+[limits]
+time_s = 5
+memory_kb = 131072 # 128MB
+processes = 5

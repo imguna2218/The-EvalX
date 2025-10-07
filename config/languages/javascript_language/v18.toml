@@ -1,0 +1,15 @@
+is_compiled = false
+source_filename = "main.js"
+executable_filename = "main.js"
+env_vars = { NODE_PATH = "/usr/lib/nodejs" }
+
+[compile]
+command = ["echo", "no-compile"]
+
+[run]
+command = ["/usr/bin/node", "main.js"]
+
+[limits]
+time_s = 5
+memory_kb = 131072 # 128MB
+processes = 5

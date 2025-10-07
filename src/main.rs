@@ -7,11 +7,11 @@ use tokio::signal;
 use tracing::{error, info};
 
 use crate::caching::redis_client::RedisClient;
-use crate::queue_management::QueueManager;
 use crate::routes::create_router;
 use crate::setup::{initialize_executor, start_workers};
 
 // MODIFIED: Removed obsolete module declarations
+mod languages;
 mod caching;
 mod controllers;
 mod executor;
@@ -36,10 +36,11 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Failed to initialize Redis pool: {}", e))?;
 
     if mode == "worker" {
-        info!("Starting in WORKER mode");
-        start_workers(queue_manager, redis_client).await;
-        signal::ctrl_c().await?;
-        info!("Worker shutting down gracefully");
+    info!("Starting in WORKER mode");
+    // MODIFIED: Pass the language registry from the executor to the worker setup.
+    start_workers(queue_manager, redis_client, executor.language_registry.clone()).await;
+    signal::ctrl_c().await?;
+    info!("Worker shutting down gracefully");
     } else {
         info!("Starting in SERVER mode");
         let app = create_router(executor.clone(), tx, redis_client, queue_manager);

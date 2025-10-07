@@ -5,6 +5,7 @@ use std::time::Instant;
 use sysinfo::System;
 use crate::caching::redis_client::RedisClient;
 use crate::models::response::EvaluationResult;
+use crate::languages::manager::LanguageRegistry;
 
 // NOTE: This struct is part of the old queuing model and will be replaced by Broccoli.
 // It is kept for now to ensure compatibility with the current queue manager.
@@ -36,17 +37,20 @@ pub enum ConcurrencyState {
 /// MODIFIED: The CodeExecutor now holds the Redis client and state for adaptive concurrency.
 /// Its responsibilities are to limit concurrency and provide the necessary context
 /// for intelligent, real-time batch parallelization adjustments.
+
 pub struct CodeExecutor {
     pub semaphore: Arc<Semaphore>,
     // MODIFIED: Switched to tokio's async RwLock
     pub last_java_warmup: Arc<RwLock<Instant>>,
-    /// MODIFIED: System handle for monitoring memory usage for progressive backoff.
+    /// MODIFIED: System handle for monitoring memory usage for progressive backoff. [cite: 619]
     pub system: Arc<Mutex<System>>,
-    /// ADDED: A Redis client for checking queue depth.
+    /// ADDED: A Redis client for checking queue depth. [cite: 620]
     pub redis_client: RedisClient,
     // MODIFIED: Switched to tokio's async RwLock
-    /// This is used to implement hysteresis (a cooldown period).
+    /// This is used to implement hysteresis (a cooldown period). [cite: 621]
     pub concurrency_state: Arc<RwLock<(ConcurrencyState, Instant)>>,
+    /// ADDED: A field to hold the language registry.
+    pub language_registry: Arc<LanguageRegistry>,
 }
 
 // ADDED: Manual Debug implementation since some fields (like RedisClient) don't derive it.

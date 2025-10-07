@@ -28,3 +28,5 @@ async-trait = "0.1"
 prometheus = { version = "0.13", features = ["process"] }
 lazy_static = "1.4.0"
 flate2 = "1.0"
+toml = "0.8" # ADDED: For parsing TOML configuration files
+glob = "0.3" # ADDED: For finding all language config files in a directory

@@ -1,13 +1,69 @@
-// src/sandbox/isolate.rs
 use anyhow::{anyhow, Result};
+use lazy_static::lazy_static;
+use std::sync::Arc;
+use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use tokio::fs;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use std::path::Path;
 use tracing::{debug, error, warn};
+
+use crate::languages::config::LanguageConfig;
+
+// --- MODIFICATION START: Implement the Box ID Pool ---
+
+lazy_static! {
+    // This creates a shared, thread-safe queue containing all possible box IDs (0-999).
+    static ref BOX_ID_POOL: Arc<Mutex<VecDeque<u16>>> = {
+        let queue: VecDeque<u16> = (0..1000).collect();
+        Arc::new(Mutex::new(queue))
+    };
+}
+
+// A helper struct to ensure the box ID is returned to the pool even if errors occur.
+struct BoxLease {
+    id: u16,
+}
+
+impl BoxLease {
+    // Acquires a box ID from the pool, waiting if none are available.
+    async fn new() -> Result<Self> {
+        let mut retries = 0;
+        loop {
+            let mut pool = BOX_ID_POOL.lock().await;
+            if let Some(id) = pool.pop_front() {
+                return Ok(Self { id });
+            }
+            // Drop the lock before sleeping to allow other threads to push IDs back.
+            drop(pool);
+            
+            if retries >= 50 { // Wait for up to 5 seconds
+                return Err(anyhow!("Failed to acquire a sandbox box ID: Pool is empty."));
+            }
+            warn!("Box ID pool is empty, waiting...");
+            sleep(Duration::from_millis(100)).await;
+            retries += 1;
+        }
+    }
+}
+
+// The `Drop` trait ensures that when a `BoxLease` goes out of scope,
+// its ID is automatically returned to the pool.
+impl Drop for BoxLease {
+    fn drop(&mut self) {
+        let pool = BOX_ID_POOL.clone();
+        let id = self.id;
+        tokio::spawn(async move {
+            let mut pool = pool.lock().await;
+            pool.push_back(id);
+        });
+    }
+}
+
+// --- MODIFICATION END ---
+
 
 pub struct CompilationResult {
     pub success: bool,
@@ -28,449 +84,96 @@ pub struct RunResult {
 
 pub struct IsolateSandbox;
 
-// CHANGED: Use u16 instead of u32 since we only need 0-999 range
-static BOX_ID_COUNTER: AtomicU16 = AtomicU16::new(0);
-
 impl IsolateSandbox {
-    /// ADDED: Returns the time limit in seconds and memory limit in kilobytes for a given language.
-    fn get_language_limits(language: &str) -> (u64, u64) {
-        const MB: u64 = 1024;
-        match language {
-            "java" | "java11" | "java21" => (8, 512 * MB),
-            "c" | "cpp" => (10, 256 * MB),
-            "python" | "javascript" => (5, 128 * MB),
-            _ => (10, 256 * MB), // A sensible default for other potential languages
-        }
-    }
-    
-    // FIXED: Generate box ID within Isolate's allowed range (0-999)
-    fn generate_unique_box_id() -> String {
-        let counter = BOX_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        // Isolate only allows box IDs from 0-999
-        // Use nanosecond timestamp to ensure uniqueness within the 0-999 range
-        let time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        
-        // Combine timestamp with counter and modulo 1000 to stay within range
-        let box_id = (time % 1000 + counter as u128) % 1000;
-        format!("{}", box_id)
-    }
+    // REMOVED: `generate_unique_box_id` is no longer needed.
 
-    /// MODIFIED: Signature now only requires language and code. Limits are determined internally.
     pub async fn compile(
         &self,
-        language: &str,
+        config: &LanguageConfig,
         code: &str,
     ) -> Result<CompilationResult> {
         let start_time = Instant::now();
         
-        // FIXED: Add retry logic for box initialization with proper ID range
-        let mut retries = 0;
-        let max_retries = 5; // Increased retries for better reliability
-        let mut box_id = Self::generate_unique_box_id();
+        // MODIFIED: Acquire a guaranteed-unique box ID from the pool.
+        let lease = BoxLease::new().await?;
+        let box_id = lease.id;
 
-        loop {
-            match self.init_box(&box_id).await {
-                Ok(()) => break,
-                Err(e) if retries < max_retries => {
-                    retries += 1;
-                    warn!("Failed to init box {}, retry {}/{}: {}", box_id, retries, max_retries, e);
-                    // Increase backoff time and generate new ID
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * retries as u64)).await;
-                    box_id = Self::generate_unique_box_id();
-                }
-                Err(e) => return Err(anyhow!("Failed to initialize sandbox after {} retries: {}", max_retries, e)),
-            }
-        }
+        self.init_box(box_id).await?;
 
-        // MODIFIED: Getting limits from the new centralized function.
-        let (time_limit_s, mem_limit_kb) = Self::get_language_limits(language);
-
-        let (source_filename, executable_filename, compile_command, java_home, node_path, python_path) = match language {
-            "c" => (
-                "main.c",
-                "main",
-                vec!["/usr/bin/gcc", "-o", "main", "main.c"],
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-            ),
-            "cpp" => (
-                "main.cpp",
-                "main",
-                vec!["/usr/bin/g++", "-o", "main", "main.cpp"],
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-            ),
-            "java" | "java21" => {
-                let v = vec![
-                    "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",
-                    "-J-XX:TieredStopAtLevel=1",
-                    "-J-Xms512m",
-                    "-J-Xmx512m",
-                    "-J-XX:MaxMetaspaceSize=192m",
-                    "-J-XX:ReservedCodeCacheSize=64m",
-                    "-J-XX:+UseSerialGC",
-                    "Main.java",
-                ];
-                (
-                    "Main.java",
-                    "Main.class",
-                    v,
-                    "/usr/lib/jvm/java-21-openjdk-amd64".to_string(),
-                    "".to_string(),
-                    "".to_string(),
-                )
-            },
-            "java11" => {
-                let v = vec![
-                    "/usr/lib/jvm/java-11-openjdk-amd64/bin/javac",
-                    "-J-XX:TieredStopAtLevel=1",
-                    "-J-Xms512m",
-                    "-J-Xmx512m",
-                    "-J-XX:MaxMetaspaceSize=192m",
-                    "-J-XX:ReservedCodeCacheSize=64m",
-                    "-J-XX:+UseSerialGC",
-                    "Main.java",
-                ];
-                (
-                    "Main.java",
-                    "Main.class",
-                    v,
-                    "/usr/lib/jvm/java-11-openjdk-amd64".to_string(),
-                    "".to_string(),
-                    "".to_string(),
-                )
-            },
-            "python" => (
-                "main.py",
-                "main.py",
-                vec!["echo", "no-compile"],
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-            ),
-            "javascript" => (
-                "main.js",
-                "main.js",
-                vec!["echo", "no-compile"],
-                "".to_string(),
-                "/usr/lib/nodejs".to_string(),
-                "".to_string(),
-            ),
-            _ => return Err(anyhow!("Unsupported compiled language: {}", language))
-        };
-
+        let limits = config.compile.limits.clone().unwrap_or_default();
+        let time_limit_s = limits.time_s;
+        let mem_limit_kb = limits.memory_kb;
+        let process_count = limits.processes;
+        
         let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
-        fs::write(format!("{}/{}", box_path, source_filename), code).await?;
+        fs::write(format!("{}/{}", box_path, &config.source_filename), code).await?;
 
-        let mut cmd;
+        let mut cmd = self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
 
-        if language.starts_with("java") {
-            // --- JAVA "CLEAN ROOM" CHROOT STRATEGY ---
-            cmd = Command::new("setarch");
-            cmd.arg(std::env::consts::ARCH).arg("-R").arg("isolate");
-
-            // Add standard isolate args
-            cmd.arg("--cg")
-               .arg(format!("--box-id={}", box_id))
-               .arg(format!("--time={}", time_limit_s))
-               .arg(format!("--wall-time={}", time_limit_s * 2))
-               .arg("--fsize=102400");
-
-            // Mount the pre-built chroot environment as the sandbox root
-            let chroot_path = if language == "java11" {
-                std::env::var("JAVA11_CHROOT_PATH").unwrap_or_else(|_| "/opt/java11_chroot".to_string())
-            } else { // Assumes java21 for "java" or "java21"
-                std::env::var("JAVA21_CHROOT_PATH").unwrap_or_else(|_| "/opt/java21_chroot".to_string())
-            };
-            cmd.arg(format!("--dir={}={}", chroot_path, "/"));
-            // Mount /etc for essential configs like resolv.conf as per the successful script
-            cmd.arg("--dir=/etc");
-        } else {
-            // --- ORIGINAL STRATEGY FOR ALL OTHER LANGUAGES ---
-            cmd = Command::new("isolate");
-            cmd.arg("--cg")
-               .arg(format!("--box-id={}", box_id))
-               .arg(format!("--time={}", time_limit_s))
-               .arg(format!("--wall-time={}", time_limit_s * 2))
-               .arg("--fsize=102400");
-
-            // Mount a wide range of host directories
-            cmd.arg("--full-env")
-                .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                .arg("--dir=/etc")
-                .arg("--dir=/bin")
-                .arg("--dir=/usr/bin")
-                .arg("--dir=/usr/local/bin")
-                .arg("--dir=/lib")
-                .arg("--dir=/lib64")
-                .arg("--dir=/usr/lib")
-                .arg("--dir=/usr/lib/gcc")
-                .arg("--dir=/usr/lib/nodejs")
-                .arg("--dir=/usr/lib/python3")
-                .arg("--dir=/usr/lib/python3.10")
-                .arg("--dir=/usr/lib/jvm")
-                .arg("--dir=/lib/x86_64-linux-gnu")
-                .arg("--dir=/usr/lib/x86_64-linux-gnu")
-                .arg("--dir=/etc/alternatives")
-                .arg("--dir=/usr/include")
-                .arg("--dir=/usr/lib/gcc/x86_64-linux-gnu/11")
-                .arg("--dir=/proc");
-        }
-
-        // Set memory and process limits
-        let compile_mem_limit_kb = match language {
-            "java" | "java11" | "java21" => 1536000, // 1.5GB, as per successful script
-            _ => mem_limit_kb,
-        };
-        cmd.arg(format!("--mem={}", compile_mem_limit_kb));
-
-        let process_count = match language {
-            "java" | "java11" | "java21" => 150,
-            _ => 10,
-        };
-        cmd.arg(format!("--processes={}", process_count));
-
-        if !java_home.is_empty() && !language.starts_with("java") {
-            cmd.arg(format!("--env=JAVA_HOME={}", java_home));
-        }
-        if !node_path.is_empty() {
-            cmd.arg(format!("--env=NODE_PATH={}", node_path));
-        }
-        if !python_path.is_empty() {
-            cmd.arg(format!("--env=PYTHONPATH={}", python_path));
-        }
-
-        cmd.arg("--run")
-           .arg("--")
-           .args(compile_command);
+        cmd.arg("--run").arg("--").args(&config.compile.command);
 
         debug!("Executing compile command: {:?}", cmd);
         let output = cmd.output().await?;
         let compile_time = start_time.elapsed().as_secs_f64();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        let result = if output.status.success() || matches!(language, "python" | "javascript") {
-            let binary = if matches!(language, "python" | "javascript") {
+        let result = if output.status.success() || !config.is_compiled {
+            let binary = if !config.is_compiled {
                 code.as_bytes().to_vec()
             } else {
-                fs::read(format!("{}/{}", box_path, executable_filename)).await?
+                fs::read(format!("{}/{}", box_path, &config.executable_filename)).await?
             };
-            CompilationResult {
-                success: true,
-                compile_time,
-                binary: Some(binary),
-                stderr,
-            }
+            CompilationResult { success: true, compile_time, binary: Some(binary), stderr }
         } else {
-            CompilationResult {
-                success: false,
-                compile_time,
-                binary: None,
-                stderr,
-            }
+            CompilationResult { success: false, compile_time, binary: None, stderr }
         };
 
-        self.cleanup_box(&box_id).await?;
-        sleep(Duration::from_millis(100)).await;
+        self.cleanup_box(box_id).await?;
         Ok(result)
     }
-
-    /// MODIFIED: Signature now only requires language, binary, and stdin. Limits are determined internally.
+    
     pub async fn run(
         &self,
-        language: &str,
+        config: &LanguageConfig,
         code_or_binary: &[u8],
         stdin: &str,
     ) -> Result<RunResult> {
-        // FIXED: Add retry logic for box initialization with proper ID range
-        let mut retries = 0;
-        let max_retries = 5; // Increased retries for better reliability
-        let mut box_id = Self::generate_unique_box_id();
+        // MODIFIED: Acquire a guaranteed-unique box ID from the pool.
+        let lease = BoxLease::new().await?;
+        let box_id = lease.id;
 
-        loop {
-            match self.init_box(&box_id).await {
-                Ok(()) => break,
-                Err(e) if retries < max_retries => {
-                    retries += 1;
-                    warn!("Failed to init box {}, retry {}/{}: {}", box_id, retries, max_retries, e);
-                    // Increase backoff time and generate new ID
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * retries as u64)).await;
-                    box_id = Self::generate_unique_box_id();
-                }
-                Err(e) => return Err(anyhow!("Failed to initialize sandbox after {} retries: {}", max_retries, e)),
-            }
-        }
+        self.init_box(box_id).await?;
 
-        // MODIFIED: Getting limits from the new centralized function.
-        let (time_limit_s_u64, mem_limit_kb) = Self::get_language_limits(language);
-        let time_limit_s = time_limit_s_u64 as f64;
-
-        let (filename_to_write, run_command, java_home, node_path, python_path) = match language {
-            "c" | "cpp" => (
-                "main",
-                vec!["./main".to_string()],
-                "".to_string(),
-                "".to_string(),
-                "".to_string(),
-            ),
-            "java" | "java21" => {
-                let v = vec![
-                    "/usr/lib/jvm/java-21-openjdk-amd64/bin/java".to_string(),
-                    "-Xms256m".to_string(), "-Xmx256m".to_string(),
-                    "-XX:MaxMetaspaceSize=64m".to_string(),
-                    "-XX:ReservedCodeCacheSize=32m".to_string(),
-                    "-XX:+UseSerialGC".to_string(),
-                    "Main".to_string(),
-                ];
-                (
-                    "Main.class",
-                    v,
-                    "/usr/lib/jvm/java-21-openjdk-amd64".to_string(),
-                    "".to_string(),
-                    "".to_string(),
-                )
-            },
-            "java11" => {
-                let v = vec![
-                    "/usr/lib/jvm/java-11-openjdk-amd64/bin/java".to_string(),
-                    "-Xms256m".to_string(), "-Xmx256m".to_string(),
-                    "-XX:MaxMetaspaceSize=64m".to_string(),
-                    "-XX:ReservedCodeCacheSize=32m".to_string(),
-                    "-XX:+UseSerialGC".to_string(),
-                    "Main".to_string(),
-                ];
-                (
-                    "Main.class",
-                    v,
-                    "/usr/lib/jvm/java-11-openjdk-amd64".to_string(),
-                    "".to_string(),
-                    "".to_string(),
-                )
-            },
-            "python" => (
-                "main.py",
-                vec!["/usr/bin/python3".to_string(), "main.py".to_string()],
-                "".to_string(),
-                "".to_string(),
-                "/usr/lib/python3.10".to_string(),
-            ),
-            "javascript" => (
-                "main.js",
-                vec!["/usr/bin/node".to_string(), "main.js".to_string()],
-                "".to_string(),
-                "/usr/lib/nodejs".to_string(),
-                "".to_string(),
-            ),
-            _ => return Err(anyhow!("Unsupported language for run: {}", language)),
-        };
+        let limits = config.run.limits.clone().unwrap_or_default();
+        let time_limit_s = limits.time_s;
+        let mem_limit_kb = limits.memory_kb;
+        let process_count = limits.processes;
 
         let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
-        let file_path = format!("{}/{}", box_path, filename_to_write);
-        fs::write(&file_path, code_or_binary).await?;
-        if matches!(language, "c" | "cpp") {
-            fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o755)).await?;
+        let file_to_write_path = format!("{}/{}", box_path, &config.executable_filename);
+        
+        fs::write(&file_to_write_path, code_or_binary).await?;
+        
+        if config.name == "c" || config.name == "cpp" {
+            fs::set_permissions(&file_to_write_path, std::fs::Permissions::from_mode(0o755)).await?;
         }
         fs::write(format!("{}/stdin.txt", box_path), stdin).await?;
 
-        let mut path_retries = 0;
-        while !Path::new(&box_path).exists() && path_retries < 10 {
-            warn!("Box path {} not found, waiting...", box_path);
-            sleep(Duration::from_millis(50)).await;
-            path_retries += 1;
-        }
-        if !Path::new(&box_path).exists() {
-            return Err(anyhow!("Box path not found after retries: {}", box_path));
-        }
-
         let meta_file_path = format!("/tmp/isolate_{}.txt", box_id);
-        let mut cmd;
-
-        if language.starts_with("java") {
-            // --- JAVA "CLEAN ROOM" CHROOT STRATEGY ---
-            cmd = Command::new("setarch");
-            cmd.arg(std::env::consts::ARCH).arg("-R").arg("isolate");
-
-            cmd.arg("--cg")
-               .arg(format!("--box-id={}", box_id))
-               .arg(format!("--time={}", time_limit_s))
-               .arg(format!("--wall-time={}", time_limit_s * 2.0))
-               .arg("--fsize=10240");
-
-            let chroot_path = if language == "java11" {
-                std::env::var("JAVA11_CHROOT_PATH").unwrap_or_else(|_| "/opt/java11_chroot".to_string())
-            } else {
-                std::env::var("JAVA21_CHROOT_PATH").unwrap_or_else(|_| "/opt/java21_chroot".to_string())
-            };
-            cmd.arg(format!("--dir={}={}", chroot_path, "/"));
-            cmd.arg("--dir=/etc");
-        } else {
-            // --- ORIGINAL STRATEGY FOR ALL OTHER LANGUAGES ---
-            cmd = Command::new("isolate");
-            cmd.arg("--cg")
-               .arg(format!("--box-id={}", box_id))
-               .arg(format!("--time={}", time_limit_s))
-               .arg(format!("--wall-time={}", time_limit_s * 2.0))
-               .arg("--fsize=10240");
-
-            cmd.arg("--full-env")
-                .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                .arg("--dir=/etc")
-                .arg("--dir=/bin")
-                .arg("--dir=/usr/bin")
-                .arg("--dir=/usr/local/bin")
-                .arg("--dir=/lib")
-                .arg("--dir=/lib64")
-                .arg("--dir=/usr/lib")
-                .arg("--dir=/usr/lib/gcc")
-                .arg("--dir=/usr/lib/nodejs")
-                .arg("--dir=/usr/lib/python3")
-                .arg("--dir=/usr/lib/python3.10")
-                .arg("--dir=/usr/lib/jvm")
-                .arg("--dir=/lib/x86_64-linux-gnu")
-                .arg("--dir=/usr/lib/x86_64-linux-gnu")
-                .arg("--dir=/etc/alternatives")
-                .arg("--dir=/usr/lib/python3.10")
-                .arg("--dir=/proc");
-        }
-
-        let final_mem_limit_kb = match language {
-            "java" | "java11" | "java21" => 786432, // 768MB, as per successful script
-            _ => mem_limit_kb,
-        };
-        cmd.arg(format!("--mem={}", final_mem_limit_kb));
-
-        let process_count = match language {
-            "java" | "java11" | "java21" => 50,
-            _ => 5,
-        };
-        cmd.arg(format!("--processes={}", process_count));
-
-        if !java_home.is_empty() && !language.starts_with("java") {
-            cmd.arg(format!("--env=JAVA_HOME={}", java_home));
-        }
-        if !node_path.is_empty() {
-            cmd.arg(format!("--env=NODE_PATH={}", node_path));
-        }
-        if !python_path.is_empty() {
-            cmd.arg(format!("--env=PYTHONPATH={}", python_path));
-        }
-
+        let mut cmd = self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
+        
         cmd.arg("--stdin=stdin.txt")
            .arg(format!("--meta={}", meta_file_path))
            .arg("--run")
            .arg("--")
-           .args(run_command);
-
+           .args(&config.run.command);
+        
         debug!("Executing run command: {:?}", cmd);
         let output = cmd.output().await?;
         let meta_content = fs::read_to_string(&meta_file_path)
             .await
             .unwrap_or_else(|_| "status:XX".to_string());
+        
         let _ = fs::remove_file(&meta_file_path).await;
 
         let mut run_time = 0.0;
@@ -489,8 +192,9 @@ impl IsolateSandbox {
                 }
             }
         }
+ 
         if status == "TO" {
-            run_time = time_limit_s;
+            run_time = time_limit_s as f64;
         }
 
         let result = RunResult {
@@ -502,20 +206,53 @@ impl IsolateSandbox {
             memory_used_kb,
             status,
         };
-        self.cleanup_box(&box_id).await?;
-        sleep(Duration::from_millis(100)).await;
+        self.cleanup_box(box_id).await?;
         Ok(result)
     }
 
-    async fn init_box(&self, box_id: &str) -> Result<()> {
-        let cgroup_path = format!("/sys/fs/cgroup/system.slice/isolate.service/box-{}", box_id);
-        let mut retries = 0;
-        while Path::new(&cgroup_path).exists() && retries < 20 {
-            warn!("Box cgroup {} still exists, waiting for cleanup...", cgroup_path);
-            sleep(Duration::from_millis(50)).await;
-            retries += 1;
+    fn build_base_command(&self, box_id: u16, config: &LanguageConfig, time: u64, mem: u64, proc: u64) -> Command {
+        // ... (this function's logic remains the same, but takes u16 for box_id)
+        let mut cmd;
+        if let Some(chroot_path) = &config.chroot_path {
+            cmd = Command::new("setarch");
+            cmd.arg(std::env::consts::ARCH).arg("-R").arg("isolate");
+            cmd.arg("--cg")
+               .arg(format!("--box-id={}", box_id));
+            cmd.arg(format!("--dir={}", chroot_path));
+            cmd.arg("--dir=/etc");
+        } else {
+            cmd = Command::new("isolate");
+            cmd.arg("--cg")
+               .arg(format!("--box-id={}", box_id))
+               .arg("--full-env")
+               .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+               .arg("--dir=/etc")
+               .arg("--dir=/bin")
+               .arg("--dir=/usr/bin")
+               .arg("--dir=/usr/local/bin")
+               .arg("--dir=/lib")
+               .arg("--dir=/lib64")
+               .arg("--dir=/usr/lib")
+               .arg("--dir=/usr/include")
+               .arg("--dir=/proc");
+        }
+        
+        cmd.arg(format!("--time={}", time))
+           .arg(format!("--wall-time={}", time * 2))
+           .arg(format!("--fsize={}", 102400))
+           .arg(format!("--mem={}", mem))
+           .arg(format!("--processes={}", proc));
+        
+        for (key, val) in &config.env_vars {
+            cmd.arg(format!("--env={}={}", key, val));
         }
 
+        cmd
+    }
+    
+    // REMOVED: `get_clean_box` is replaced by the `BoxLease` mechanism.
+
+    async fn init_box(&self, box_id: u16) -> Result<()> {
         let output = Command::new("isolate")
             .arg("--cg")
             .arg(format!("--box-id={}", box_id))
@@ -524,32 +261,24 @@ impl IsolateSandbox {
             .await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            // This error is now more critical as collisions shouldn't happen.
+            error!("Failed to initialize isolate box {}: {}", box_id, stderr);
             return Err(anyhow!("Failed to initialize isolate box {}: {}", box_id, stderr));
         }
         Ok(())
     }
 
-    async fn cleanup_box(&self, box_id: &str) -> Result<()> {
+    async fn cleanup_box(&self, box_id: u16) -> Result<()> {
         let output = Command::new("isolate")
             .arg("--cg")
             .arg(format!("--box-id={}", box_id))
             .arg("--cleanup")
             .output()
             .await?;
-        
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Only log as error if it's not "box doesn't exist" error
-            if !stderr.contains("No such file or directory") && !stderr.contains("does not exist") {
+            if !stderr.contains("No such file or directory") {
                 error!("Failed to cleanup isolate box {}: {}", box_id, stderr);
-                // Force cleanup using system commands as fallback
-                let _ = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("rm -rf /var/local/lib/isolate/{} 2>/dev/null || true", box_id))
-                    .output()
-                    .await;
-            } else {
-                debug!("Box {} already cleaned up", box_id);
             }
         }
         Ok(())

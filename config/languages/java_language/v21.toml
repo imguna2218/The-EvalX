@@ -1,0 +1,28 @@
+is_compiled = true
+source_filename = "Main.java"
+executable_filename = "Main.class"
+chroot_path = "/opt/java21_chroot"
+
+[compile]
+command = [
+    "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",
+    "-J-XX:TieredStopAtLevel=1",
+    "-J-Xms512m",
+    "-J-Xmx512m",
+    "-J-XX:MaxMetaspaceSize=192m",
+    "-J-XX:ReservedCodeCacheSize=64m",
+    "-J-XX:+UseSerialGC",
+    "Main.java",
+]
+limits = { time_s = 8, memory_kb = 1536000, processes = 150 } # 1.5GB
+
+[run]
+command = [
+    "/usr/lib/jvm/java-21-openjdk-amd64/bin/java",
+    "-Xms256m", "-Xmx256m",
+    "-XX:MaxMetaspaceSize=64m",
+    "-XX:ReservedCodeCacheSize=32m",
+    "-XX:+UseSerialGC",
+    "Main",
+]
+limits = { time_s = 8, memory_kb = 786432, processes = 50 } # 768MB
