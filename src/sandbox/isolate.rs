@@ -113,7 +113,37 @@ impl IsolateSandbox {
         cmd.arg("--run").arg("--").args(&config.compile.command);
 
         debug!("Executing compile command: {:?}", cmd);
-        let output = cmd.output().await?;
+
+        // FIX: Spawn the process to get its PID for robust timeout handling.
+        // FIX: Spawn the process to get its PID for robust timeout handling.
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => return Err(anyhow!("Failed to spawn compile command: {}", e)),
+        };
+        let child_id = child.id().unwrap_or(0);
+
+        let execution_future = child.wait_with_output();
+        let timeout_duration = Duration::from_secs(time_limit_s + 2);
+
+        let output = match tokio::time::timeout(timeout_duration, execution_future).await {
+            // Process finished on its own.
+            Ok(Ok(output)) => output,
+            // Process failed immediately after spawning.
+            Ok(Err(e)) => return Err(anyhow!("Compile process failed: {}", e)),
+            // Our timeout was hit. The process is now a zombie.
+            Err(_) => {
+                error!(
+                    "Compile command for '{}' (PID: {}) timed out. Attempting to kill.",
+                    config.name, child_id
+                );
+                // Explicitly kill the runaway process.
+                if let Err(e) = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await {
+                    error!("Failed to kill runaway compile process with PID {}: {}", child_id, e);
+                }
+                return Err(anyhow!("Compiler process hung and was terminated."));
+            }
+        };
+
         let compile_time = start_time.elapsed().as_secs_f64();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -132,20 +162,21 @@ impl IsolateSandbox {
         Ok(result)
     }
     
+    // FIX: The function signature is changed to accept the final time limit.
     pub async fn run(
         &self,
         config: &LanguageConfig,
         code_or_binary: &[u8],
         stdin: &str,
+        time_limit_s: u64, // The timeout is now passed in.
     ) -> Result<RunResult> {
-        // MODIFIED: Acquire a guaranteed-unique box ID from the pool.
         let lease = BoxLease::new().await?;
         let box_id = lease.id;
 
         self.init_box(box_id).await?;
 
+        // FIX: Time limit is now from the argument. Memory/process limits are still from config.
         let limits = config.run.limits.clone().unwrap_or_default();
-        let time_limit_s = limits.time_s;
         let mem_limit_kb = limits.memory_kb;
         let process_count = limits.processes;
 
@@ -169,12 +200,71 @@ impl IsolateSandbox {
            .args(&config.run.command);
         
         debug!("Executing run command: {:?}", cmd);
-        let output = cmd.output().await?;
+
+        // --- START OF DEFINITIVE FIX ---
+
+        // 1. Spawn the process to get its PID for robust timeout handling.
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => return Err(anyhow!("Failed to spawn run command: {}", e)),
+        };
+        let child_id = child.id().unwrap_or(0);
+
+        let execution_future = child.wait_with_output();
+        let timeout_duration = Duration::from_secs(time_limit_s + 2);
+
+        // 2. Wait for the process to finish, with our timeout as a safety net.
+        // 2. Wait for the process to finish, with our timeout as a safety net.
+        let output = match tokio::time::timeout(timeout_duration, execution_future).await {
+            Ok(Ok(output)) => {
+                // The process finished on its own (successfully or with an error).
+                output
+            }
+            Ok(Err(e)) => {
+                // The process failed to even run properly.
+                return Err(anyhow!("Run process failed: {}", e));
+            }
+            Err(_) => { // Our timeout was hit. The process is a zombie.
+                error!(
+                    "Run command for '{}' (PID: {}) timed out. Attempting to kill.",
+                    config.name, child_id
+                );
+                // Explicitly kill the runaway process.
+                if let Err(e) = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await {
+                    error!("Failed to kill runaway run process with PID {}: {}", child_id, e);
+                }
+                
+                // THIS IS THE FIX: Instead of returning an error, we now
+                // construct and return a proper Time Limit Exceeded result.
+                let tle_result = RunResult {
+                    stdout: String::new(),
+                    stderr: "Time Limit Exceeded".to_string(),
+                    exit_code: -1,
+                    run_time: time_limit_s as f64,
+                    wall_time: 0.0,
+                    memory_used_kb: 0,
+                    status: "TO".to_string(),
+                };
+                
+                self.cleanup_box(box_id).await?;
+                return Ok(tle_result); // Return the valid TLE result.
+            }
+        };
+
+        // 3. NOW that the process is finished, read the output and metadata files.
+        let program_stdout = fs::read_to_string(format!("{}/stdout.txt", box_path))
+            .await
+            .unwrap_or_default();
+        let program_stderr = fs::read_to_string(format!("{}/stderr.txt", box_path))
+            .await
+            .unwrap_or_default();
         let meta_content = fs::read_to_string(&meta_file_path)
             .await
             .unwrap_or_else(|_| "status:XX".to_string());
         
         let _ = fs::remove_file(&meta_file_path).await;
+
+        // --- END OF DEFINITIVE FIX ---
 
         let mut run_time = 0.0;
         let mut wall_time = 0.0;
@@ -197,15 +287,29 @@ impl IsolateSandbox {
             run_time = time_limit_s as f64;
         }
 
+        let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let final_stderr = if status == "TO" {
+            // If isolate reported a Time Out, this is the only message that matters.
+            "Time Limit Exceeded".to_string()
+        } else if !program_stderr.is_empty() {
+            // Otherwise, prioritize the program's own stderr (e.g., for runtime errors).
+            program_stderr
+        } else {
+            // Finally, fall back to isolate's own stderr metadata.
+            isolate_stderr
+        };
+
         let result = RunResult {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            stdout: program_stdout,
+            stderr: final_stderr,
             exit_code: output.status.code().unwrap_or(-1) as i64,
             run_time,
             wall_time,
             memory_used_kb,
             status,
         };
+        
         self.cleanup_box(box_id).await?;
         Ok(result)
     }
@@ -237,7 +341,10 @@ impl IsolateSandbox {
                .arg("--dir=/proc");
         }
         
-        cmd.arg(format!("--time={}", time))
+        // Add stdout and stderr file redirection
+        cmd.arg("--stdout=stdout.txt")
+           .arg("--stderr=stderr.txt")
+           .arg(format!("--time={}", time))
            .arg(format!("--wall-time={}", time * 2))
            .arg(format!("--fsize={}", 102400))
            .arg(format!("--mem={}", mem))

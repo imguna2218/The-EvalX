@@ -33,8 +33,12 @@ pub async fn handle_execute(
     let version = request.version.as_ref().unwrap_or(&"".to_string()).to_string();
     let code = request.code.as_ref().unwrap_or(&"".to_string()).to_string();
     let stdin = request.stdin.clone();
-    let timeout = request.timeout.unwrap_or(10);
-    
+    // FIX: Read the default timeout from the environment instead of hardcoding it.
+    let default_timeout: u64 = env::var("DEFAULT_TIMEOUT")
+        .unwrap_or_else(|_| "10".to_string())
+        .parse()
+        .unwrap_or(10);
+    let timeout = request.timeout.unwrap_or(default_timeout);
     let cache_key = format!(
         "evalx:exec:{}:{}:{}:{}:{}",
         language,

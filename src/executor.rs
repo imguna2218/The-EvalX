@@ -207,14 +207,24 @@ impl CodeExecutor {
         let concurrency_limit = self.calculate_optimal_concurrency(&base_language, &base_version, requests.len()).await;
         info!("Running batch with adaptive concurrency limit of {}", concurrency_limit);
 
+        // FIX: Read the default timeout from the environment once per batch.
+        let default_timeout: u64 = env::var("DEFAULT_TIMEOUT")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .unwrap_or(10);
+
         let results_stream = stream::iter(requests).map(|request| {
             let config_clone = Arc::clone(&lang_config);
             let artifact_clone = Arc::clone(&shared_artifact);
             
             async move {
                 let sandbox = IsolateSandbox;
-                // MODIFIED: Pass the full config object to run
-                match sandbox.run(&config_clone, &artifact_clone, &request.stdin).await {
+            
+                // FIX: Determine the final time limit. Priority is: user request > .env default.
+                let time_limit = request.timeout.unwrap_or(default_timeout);
+
+                // FIX: Pass the final time limit to the run function.
+                match sandbox.run(&config_clone, &artifact_clone, &request.stdin, time_limit).await {
                     Ok(run_result) => Ok(EvaluationResult {
                         compile_time: 0.0,
                         stdout: run_result.stdout,
