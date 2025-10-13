@@ -185,7 +185,9 @@ impl IsolateSandbox {
         
         fs::write(&file_to_write_path, code_or_binary).await?;
         
-        if config.name == "c" || config.name == "cpp" {
+        // MODIFIED: Dynamically set permissions based on the config file.
+        // This automatically handles any compiled language.
+        if config.is_compiled {
             fs::set_permissions(&file_to_write_path, std::fs::Permissions::from_mode(0o755)).await?;
         }
         fs::write(format!("{}/stdin.txt", box_path), stdin).await?;
@@ -333,14 +335,22 @@ impl IsolateSandbox {
                .arg("--dir=/etc")
                .arg("--dir=/bin")
                .arg("--dir=/usr/bin")
+         
                .arg("--dir=/usr/local/bin")
                .arg("--dir=/lib")
                .arg("--dir=/lib64")
                .arg("--dir=/usr/lib")
                .arg("--dir=/usr/include")
-               .arg("--dir=/proc");
-        }
+               .arg("--dir=/proc")
+               .arg("--stdout=stdout.txt");
         
+                for path in &config.mount_paths {
+                    cmd.arg(format!("--dir={}", path));
+                }
+
+                
+        }
+                
         // Add stdout and stderr file redirection
         cmd.arg("--stdout=stdout.txt")
            .arg("--stderr=stderr.txt")

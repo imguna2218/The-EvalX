@@ -176,9 +176,20 @@ impl RedisClient {
             compressed: is_compressed,
         };
         
+        // In set_artifact_async method
+        let java_artifact_ttl: usize = env::var("JAVA_ARTIFACT_TTL_SECONDS")
+            .unwrap_or_else(|_| "200".to_string())
+            .parse()
+            .unwrap_or(200);
+            
+        let default_artifact_ttl: usize = env::var("DEFAULT_ARTIFACT_TTL_SECONDS") 
+            .unwrap_or_else(|_| "200".to_string())
+            .parse()
+            .unwrap_or(200);
+
         let ttl_seconds = match language {
-            "java" | "java11" | "java21" => 300, 
-            _ => 1800,
+            "java" | "java11" | "java21" => java_artifact_ttl, 
+            _ => default_artifact_ttl,
         };
 
         let serialized = serde_json::to_string(&artifact)?;

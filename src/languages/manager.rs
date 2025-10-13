@@ -44,6 +44,7 @@ impl LanguageRegistry {
                     }
 
                     // 4. Construct the final, in-memory LanguageConfig
+                    // 4. Construct the final, in-memory LanguageConfig
                     let config = LanguageConfig {
                         name: lang_name.clone(),
                         version: lang_version.clone(),
@@ -52,6 +53,7 @@ impl LanguageRegistry {
                         executable_filename: toml_config.executable_filename,
                         chroot_path: toml_config.chroot_path,
                         env_vars: toml_config.env_vars,
+                        mount_paths: toml_config.mount_paths, // ADDED: Pass the new field
                         compile: toml_config.compile,
                         run: toml_config.run,
                     };

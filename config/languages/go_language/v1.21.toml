@@ -1,0 +1,17 @@
+is_compiled = true
+source_filename = "main.go"
+executable_filename = "main"
+
+# ADDED: This tells the sandbox to 
+mount_paths = ["/usr/lib/go-1.18"] 
+
+[compile]
+command = ["/usr/bin/go", "build", "-o", "main", "main.go"]
+
+[run]
+command = ["./main"]
+
+[limits]
+time_s = 10
+memory_kb = 262144
+processes = 15

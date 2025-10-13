@@ -24,6 +24,9 @@ pub struct QueueManager {
 }
 
 impl QueueManager {
+    // Load result TTL from environment
+    
+        
     pub fn new(executor: Arc<CodeExecutor>, redis_client: RedisClient, notification_tx: Arc<broadcast::Sender<ExecutionNotification>>) -> Self {
         QueueManager {
             queue: crate::queue_management::ExecutionQueue::new(redis_client.clone()),
@@ -80,6 +83,10 @@ impl QueueManager {
     }
 
     pub async fn start_worker(&self, language: String, version: String, redis_client: RedisClient) -> Result<(), anyhow::Error> {
+        let result_ttl: usize = env::var("RESULT_TTL_SECONDS")
+        .unwrap_or_else(|_| "200".to_string())
+        .parse()
+        .unwrap_or(200);
         info!("Starting worker for language: {}, version: {}", language, version);
         let language_version = format!("{}:{}", language, version);
         let queue_key = format!("queue:{}", language_version);
@@ -158,7 +165,7 @@ impl QueueManager {
                     match executor_clone.execute_batch(task.requests.clone(), redis_client.clone(), Some(task_id.clone())).await {
                         Ok(results) => {
                             let serialized_results = serde_json::to_string(&results)?;
-                            conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
+                            conn.set_ex::<_, _, ()>(&result_key, serialized_results, result_ttl).await?;
                             if let Err(e) = conn.set::<_, _, ()>(&status_key, "completed").await {
                                 error!("Failed to set status to completed for task {}: {}", task_id, e);
                             }
@@ -173,7 +180,7 @@ impl QueueManager {
                                 warn!("Task {} failed after {} retries. Moving to Dead Letter Queue.", task_id, max_retries);
                                 let error_result = vec![EvaluationResult::error_result(format!("Execution failed after {} retries: {}", max_retries, e))];
                                 let serialized_results = serde_json::to_string(&error_result)?;
-                                conn.set_ex::<_, _, ()>(&result_key, serialized_results, 3600).await?;
+                                conn.set_ex::<_, _, ()>(&result_key, serialized_results, result_ttl).await?;
                                 if let Err(e) = conn.set::<_, _, ()>(&status_key, "failed").await {
                                     error!("Failed to set status to failed for task {}: {}", task_id, e);
                                 }
