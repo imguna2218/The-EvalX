@@ -1,6 +1,7 @@
 is_compiled = false
 source_filename = "main.js"
 executable_filename = "main.js"
+chroot_path = "/opt/evalx/chroots/javascript18"
 env_vars = { NODE_PATH = "/usr/lib/nodejs" }
 
 [compile]

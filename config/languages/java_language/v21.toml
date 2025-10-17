@@ -1,7 +1,6 @@
 is_compiled = true
 source_filename = "Main.java"
 executable_filename = "Main.class"
-chroot_path = "/opt/java21_chroot"
 
 [compile]
 command = [

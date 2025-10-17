@@ -1,3 +1,5 @@
+// src/setup.rs
+
 use anyhow::Result;
 use std::env;
 use std::sync::Arc;
@@ -8,17 +10,17 @@ use crate::caching::redis_client::RedisClient;
 use crate::queue_management::QueueManager;
 use crate::types::index::{CodeExecutor, ExecutionNotification, ConcurrencyState};
 use sysinfo::{System, SystemExt};
-// ADDED: Import the new LanguageRegistry
 use crate::languages::manager::LanguageRegistry;
 
-pub async fn initialize_executor() -> Result<(
+pub async fn initialize_executor(
+    redis_client: RedisClient, // ACCEPT the one true client.
+) -> Result<(
     Arc<CodeExecutor>,
     Arc<broadcast::Sender<ExecutionNotification>>,
     Arc<QueueManager>,
 )> {
     dotenv::dotenv().ok();
     
-    // ADDED: Initialize the language registry from config files at startup.
     let language_registry = Arc::new(LanguageRegistry::new()?);
 
     let max_sandboxes = env::var("MAX_CONCURRENT_SANDBOXES")
@@ -26,18 +28,15 @@ pub async fn initialize_executor() -> Result<(
         .parse::<usize>()?;
     info!("Max concurrent Isolate sandboxes: {}", max_sandboxes);
 
-    let redis_client = RedisClient::new().await?;
-    
     let executor = Arc::new(CodeExecutor {
         semaphore: Arc::new(Semaphore::new(max_sandboxes)),
         last_java_warmup: Arc::new(RwLock::new(Instant::now())),
         system: Arc::new(Mutex::new(System::new_all())),
-        redis_client: redis_client.clone(),
+        redis_client: redis_client.clone(), // This now correctly uses the client passed into the function.
         concurrency_state: Arc::new(RwLock::new((
             ConcurrencyState::Nominal,
             Instant::now(),
         ))),
-        // ADDED: Pass the initialized registry to the executor.
         language_registry,
     });
     
@@ -57,13 +56,11 @@ pub async fn initialize_executor() -> Result<(
     Ok((executor, tx, queue_manager))
 }
 
-/// MODIFIED: This function now dynamically starts workers based on loaded configurations.
 pub async fn start_workers(
     queue_manager: Arc<QueueManager>,
     redis_client: RedisClient,
-    language_registry: Arc<LanguageRegistry> // ADDED: Pass the registry to the workers setup.
+    language_registry: Arc<LanguageRegistry>
 ) {
-    // MODIFIED: The list of languages is now retrieved dynamically from the registry.
     let languages = language_registry.list_all();
     
     if languages.is_empty() {
@@ -73,7 +70,6 @@ pub async fn start_workers(
 
     for lang_config in languages {
         let queue_manager_clone = queue_manager.clone();
-        // MODIFIED: Get language and version from the config struct.
         let language_clone = lang_config.name.clone();
         let version_clone = lang_config.version.clone();
         let redis_client_clone = redis_client.clone();

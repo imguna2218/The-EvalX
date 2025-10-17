@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::sync::atomic::{AtomicU16, Ordering};
 use mobc::{Connection, Pool};
 use mobc_redis::redis::{self, aio::MultiplexedConnection, AsyncCommands};
 use mobc_redis::RedisConnectionManager;
@@ -15,8 +16,12 @@ use flate2::Compression;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+
+static CONNECTION_COUNTER: AtomicU16 = AtomicU16::new(0);
+
 #[derive(Clone)]
 pub struct RedisClient {
+    client: redis::Client,
     pool: Pool<RedisConnectionManager>,
     /// ADDED: Tracks the last access time of artifact keys for LRU eviction.
     artifact_access: Arc<Mutex<HashMap<String, Instant>>>,
@@ -39,6 +44,7 @@ fn compress_binary(data: &[u8]) -> Result<Vec<u8>> {
 /// Helper function to decompress GZIP-compressed binary data.
 fn decompress_binary(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = GzDecoder::new(data);
+    // FIXED: Corrected the typo from `Vec<new>()` to `Vec::new()`.
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)?;
     Ok(decompressed)
@@ -52,37 +58,116 @@ impl RedisClient {
         let redis_url = format!("redis://{}:{}", redis_host, redis_port);
 
         let client = redis::Client::open(redis_url)?;
-        let manager = RedisConnectionManager::new(client);
+        let manager = RedisConnectionManager::new(client.clone()); // Clone the client for the pool manager.
         let pool = Pool::builder()
             .max_open(100) // Max 100 connections
             .max_idle(20) // Keep up to 20 idle connections ready
             .get_timeout(Some(Duration::from_secs(5))) // Wait max 5s for a connection
             .max_lifetime(Some(Duration::from_secs(3600))) // Recycle connections after 1hr
             .build(manager);
-        
+
         Ok(RedisClient {
+            client, // Store the original client instance.
             pool,
-            // ADDED: Initialize the artifact access tracker.
             artifact_access: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    // Helper to get a connection from the pool
-    async fn get_conn(&self) -> Result<Connection<RedisConnectionManager>> {
-        self.pool.get().await.map_err(|e| anyhow!("Failed to get Redis connection from pool: {}", e))
+    /// ADDED: Diagnostic method to check pool status
+    pub async fn diagnose_pool_health(&self) -> Result<()> {
+        const POOL_KEY: &str = "evalx:sandbox_ids:available";
+        let mut conn = self.get_conn().await?;
+        
+        let pool_size: u64 = conn.scard(POOL_KEY).await?;
+        let in_use_estimate = 1000 - pool_size; // Assuming 1000 total IDs
+        
+        info!("Sandbox Pool Diagnostics - Available: {}, Estimated In Use: {}", pool_size, in_use_estimate);
+        
+        if pool_size == 0 {
+            error!("CRITICAL: Sandbox pool is completely empty!");
+            // Try to recover by reinitializing the pool
+            self.emergency_pool_recovery().await?;
+        }
+        
+        Ok(())
+    }
+
+    /// ADDED: Emergency recovery for pool exhaustion
+    pub async fn emergency_pool_recovery(&self) -> Result<()> {
+        const POOL_KEY: &str = "evalx:sandbox_ids:available";
+        const POOL_SIZE: u16 = 1000;
+        
+        warn!("Attempting emergency sandbox pool recovery...");
+        let mut conn = self.get_multiplexed_async_connection().await?;
+        
+        // Clear and repopulate the pool
+        conn.del(POOL_KEY).await?;
+        
+        let mut pipe = redis::pipe();
+        for i in 0..POOL_SIZE {
+            pipe.sadd(POOL_KEY, i);
+        }
+        pipe.query_async(&mut conn).await?;
+        
+        info!("Emergency pool recovery completed - {} IDs added", POOL_SIZE);
+        Ok(())
+    }
+
+    // MODIFIED: Made the function public so other modules can access it.
+    pub async fn get_conn(&self) -> Result<Connection<RedisConnectionManager>> {
+        let conn_id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+        
+        match self.pool.get().await {
+            Ok(conn) => {
+                debug!("Successfully acquired Redis connection #{}", conn_id);
+                Ok(conn)
+            }
+            Err(e) => {
+                error!("Failed to get Redis connection #{} from pool: {}", conn_id, e);
+                Err(anyhow!("Failed to get Redis connection from pool: {}", e))
+            }
+        }
     }
 
     /// This is a convenience method for parts of the app (like the queue manager)
     /// that need a dedicated multiplexed connection for pub/sub or blocking operations.
     pub async fn get_multiplexed_async_connection(&self) -> Result<MultiplexedConnection> {
-        // This method needs to create a new client to get a truly separate multiplexed connection,
-        // which is ideal for long-lived worker tasks like BRPOP.
-        let redis_host = env::var("REDIS_HOST").unwrap_or_else(|_| "localhost".to_string());
-        let redis_port = env::var("REDIS_PORT").unwrap_or_else(|_| "6379".to_string());
-        let redis_url = format!("redis://{}:{}", redis_host, redis_port);
+    // FIX: Use the original client for multiplexed connections, but ensure proper cleanup
+        self.client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| anyhow!("Failed to get multiplexed Redis connection: {}", e))
+    }
+    /// ADDED: New method to explicitly return sandbox IDs to pool
+    pub async fn return_sandbox_id(&self, box_id: u16) -> Result<()> {
+        const POOL_KEY: &str = "evalx:sandbox_ids:available";
+        let mut conn = self.get_conn().await?;
         
-        let client = redis::Client::open(redis_url)?;
-        client.get_multiplexed_async_connection().await.map_err(|e| anyhow!("Failed to get multiplexed Redis connection: {}", e))
+        match conn.sadd::<_, _, ()>(POOL_KEY, box_id).await {
+            Ok(_) => {
+                debug!("Successfully returned sandbox ID {} to pool", box_id);
+                Ok(())
+            }
+            Err(e) => {
+                error!("CRITICAL: Failed to return sandbox ID {} to pool: {}", box_id, e);
+                Err(anyhow!("Failed to return sandbox ID to pool: {}", e))
+            }
+        }
+    }
+
+        /// ADDED: Method to check pool health
+    pub async fn check_pool_health(&self) -> Result<()> {
+        const POOL_KEY: &str = "evalx:sandbox_ids:available";
+        let mut conn = self.get_conn().await?;
+        
+        let pool_size: u64 = conn.scard(POOL_KEY).await?;
+        debug!("Sandbox pool health check: {} IDs available", pool_size);
+        
+        if pool_size == 0 {
+            warn!("SANDBOX POOL CRITICAL: No sandbox IDs available!");
+        }
+        
+        Ok(())
     }
 
     // --- Asynchronous Methods (Non-Blocking) ---
@@ -122,7 +207,6 @@ impl RedisClient {
     }
 
     /// MODIFIED: Now updates the access time for the artifact on cache hit.
-        /// MODIFIED: Now updates the access time for the artifact on cache hit.
     pub async fn get_artifact_async(&self, key: &str, language: &str) -> Result<Option<Artifact>> {
         let mut conn = self.get_conn().await?;
         let value: Option<String> = conn.get(key).await?;
@@ -233,8 +317,6 @@ impl RedisClient {
 
                 if let (Some(used), Some(max)) = (used_memory, max_memory) {
                     if max == 0 {
-                        // Max memory is not set in redis.conf, so we can't calculate usage.
-                        // We will skip eviction to avoid incorrect behavior.
                         return Ok(());
                     }
 
@@ -253,7 +335,6 @@ impl RedisClient {
                         let mut artifacts: Vec<_> = access_map.iter().collect();
                         artifacts.sort_by_key(|&(_, instant)| instant);
 
-                        // Evict 10% of the oldest artifacts
                         let eviction_count = (artifacts.len() as f64 * 0.1).ceil() as usize;
                         let to_evict: Vec<_> = artifacts.iter().take(eviction_count).map(|(k, _)| k.to_string()).collect();
 
@@ -263,9 +344,9 @@ impl RedisClient {
                             for key in &to_evict {
                                 pipe.del(key);
                             }
-                            pipe.query_async(&mut conn).await?;
+                            // FIXED: Added explicit type annotation to fix the warning.
+                            pipe.query_async::<_, ()>(&mut conn).await?;
 
-                            // Remove from our tracking map
                             for key in &to_evict {
                                 access_map.remove(key);
                             }
@@ -281,3 +362,4 @@ impl RedisClient {
         }
     }
 }
+

@@ -21,7 +21,6 @@ impl LanguageRegistry {
         for entry in glob(config_pattern).context(format!("Failed to read glob pattern {}", config_pattern))? {
             match entry {
                 Ok(path) => {
-                    // 1. Parse name and version from path
                     let (lang_name, lang_version) = match Self::parse_path(&path) {
                         Some(result) => result,
                         None => {
@@ -30,21 +29,23 @@ impl LanguageRegistry {
                         }
                     };
                     
-                    // 2. Read and parse the TOML file content
                     let content = fs::read_to_string(&path)
                         .with_context(|| format!("Failed to read language config file: {:?}", path))?;
                     
                     let toml_config: TomlConfig = toml::from_str(&content)
                         .with_context(|| format!("Failed to parse TOML from file: {:?}", path))?;
 
-                    // 3. ADDED: Validate the parsed configuration
                     if let Err(e) = Self::validate_config(&toml_config) {
                         error!("Invalid configuration in {:?}: {}. Skipping.", path, e);
                         continue;
                     }
+                    
+                    // --- ADDED: Startup Path Validation ---
+                    // This is a critical pre-flight check. It ensures the application doesn't start
+                    // with a broken configuration that would lead to runtime errors.
+                    Self::validate_paths(&path, &toml_config)?;
+                    // --- END OF ADDITION ---
 
-                    // 4. Construct the final, in-memory LanguageConfig
-                    // 4. Construct the final, in-memory LanguageConfig
                     let config = LanguageConfig {
                         name: lang_name.clone(),
                         version: lang_version.clone(),
@@ -53,7 +54,7 @@ impl LanguageRegistry {
                         executable_filename: toml_config.executable_filename,
                         chroot_path: toml_config.chroot_path,
                         env_vars: toml_config.env_vars,
-                        mount_paths: toml_config.mount_paths, // ADDED: Pass the new field
+                        mount_paths: toml_config.mount_paths,
                         compile: toml_config.compile,
                         run: toml_config.run,
                     };
@@ -73,7 +74,6 @@ impl LanguageRegistry {
         Ok(Self { configs })
     }
 
-    /// ADDED: Private helper to validate required fields in the config.
     fn validate_config(config: &TomlConfig) -> Result<()> {
         if config.source_filename.is_empty() {
             return Err(anyhow!("'source_filename' cannot be empty."));
@@ -92,13 +92,48 @@ impl LanguageRegistry {
         Ok(())
     }
 
-    /// Parses a file path to extract the language name and version.
+    /// ADDED: Validates that all executable paths and mount paths exist on the host filesystem.
+    /// Panics if any path is not found, preventing runtime errors.
+    fn validate_paths(config_path: &Path, config: &TomlConfig) -> Result<()> {
+        let check = |p: &String| {
+        // Only validate absolute paths. Ignore relative paths like "./main".
+            if p.starts_with('/') {
+                if !Path::new(p).exists() {
+                        // This is a fatal configuration error. The application cannot run correctly.
+                    panic!(
+                        "FATAL CONFIG ERROR in \"{}\": Path '{}' does not exist on the host machine. The application cannot start.",
+                        config_path.display(), p
+                    );
+                }
+            }
+        };
+
+        // The first element of a command is the executable.
+        if let Some(exe) = config.compile.command.get(0) {
+            if exe != "echo" { // Ignore placeholder commands
+                check(exe);
+            }
+        }
+        if let Some(exe) = config.run.command.get(0) {
+            check(exe);
+        }
+
+        for path in &config.mount_paths {
+            check(path);
+        }
+        
+        if let Some(chroot) = &config.chroot_path {
+            check(chroot);
+        }
+
+        Ok(())
+    }
+
     fn parse_path(path: &Path) -> Option<(String, String)> {
         let version_str = path.file_stem()?.to_str()?.strip_prefix('v')?.to_string();
         let lang_dir_name = path.parent()?.file_name()?.to_str()?;
         let lang_name = lang_dir_name.strip_suffix("_language")?.to_string();
         
-        // Handle special cases from your old setup.rs to maintain API compatibility
         let final_lang_name = if lang_name == "java" && version_str == "11" {
             "java11".to_string()
         } else {
@@ -108,12 +143,10 @@ impl LanguageRegistry {
         Some((final_lang_name, version_str))
     }
     
-    /// Retrieves a language configuration by its key (e.g., "python:3.9").
     pub fn get(&self, key: &str) -> Option<Arc<LanguageConfig>> {
         self.configs.get(key).cloned()
     }
 
-    /// Returns a list of all loaded language configurations.
     pub fn list_all(&self) -> Vec<Arc<LanguageConfig>> {
         self.configs.values().cloned().collect()
     }

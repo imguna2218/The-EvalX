@@ -1,7 +1,7 @@
 is_compiled = false
 source_filename = "main.py"
 executable_filename = "main.py"
-env_vars = { PYTHONPATH = "/usr/lib/python3.10" }
+env_vars = { PYTHONPATH = "/usr/lib/python3.9" }
 
 [compile]
 command = ["echo", "no-compile"]

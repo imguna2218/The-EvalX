@@ -1,9 +1,7 @@
 is_compiled = true
 source_filename = "main.go"
 executable_filename = "main"
-
-# ADDED: This tells the sandbox to 
-mount_paths = ["/usr/lib/go-1.18"] 
+chroot_path = "/opt/evalx/chroots/go"
 
 [compile]
 command = ["/usr/bin/go", "build", "-o", "main", "main.go"]
