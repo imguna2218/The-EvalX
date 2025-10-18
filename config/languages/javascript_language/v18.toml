@@ -1,14 +1,14 @@
 is_compiled = false
 source_filename = "main.js"
 executable_filename = "main.js"
-chroot_path = "/opt/evalx/chroots/javascript18"
-env_vars = { NODE_PATH = "/usr/lib/nodejs" }
+chroot_path = "/opt/evalx/chroots/javascript"
+env_vars = { NODE_PATH = "/opt/nodejs/lib/node_modules" }
 
 [compile]
-command = ["echo", "no-compile"]
+command = ["/usr/bin/node", "main.js"]
 
 [run]
-command = ["/usr/bin/node", "main.js"]
+command = ["/usr/bin/nodejs", "main.js"]
 
 [limits]
 time_s = 5

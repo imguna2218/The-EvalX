@@ -86,8 +86,8 @@ impl IsolateSandbox {
             let compile_time = start_time.elapsed().as_secs_f64();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            if output.status.success() || !config.is_compiled {
-                let binary = if !config.is_compiled {
+            if output.status.success() ||!config.is_compiled {
+                let binary = if!config.is_compiled {
                     code.as_bytes().to_vec()
                 } else {
                     fs::read(format!("{}/{}", box_path, &config.executable_filename)).await?
@@ -156,10 +156,10 @@ impl IsolateSandbox {
             let meta_file_path = format!("/tmp/isolate_{}.txt", box_id);
             let mut cmd = self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
             cmd.arg("--stdin=stdin.txt")
-            .arg(format!("--meta={}", meta_file_path))
-            .arg("--run")
-            .arg("--")
-            .args(&config.run.command);
+           .arg(format!("--meta={}", meta_file_path))
+           .arg("--run")
+           .arg("--")
+           .args(&config.run.command);
             debug!("Executing run command: {:?}", cmd);
 
             let child = cmd.spawn()?;
@@ -215,7 +215,7 @@ impl IsolateSandbox {
             let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let final_stderr = if status == "TO" {
                 "Time Limit Exceeded".to_string()
-            } else if !program_stderr.is_empty() {
+            } else if!program_stderr.is_empty() {
                 program_stderr
             } else {
                 isolate_stderr
@@ -259,58 +259,64 @@ impl IsolateSandbox {
         proc: u64,
     ) -> Command {
         let mut cmd = Command::new("isolate");
-        
-        if let Some(chroot_path) = &config.chroot_path {
-            cmd.arg("--env=PATH=/usr/bin:/bin");
-            let dirs_to_bind = ["bin", "etc", "lib", "lib64", "usr", "sbin"];
-            for dir in dirs_to_bind {
-                let source_path = std::path::Path::new(chroot_path).join(dir);
-                if source_path.exists() {
-                    cmd.arg(format!("--dir=/{}={}", dir, source_path.display()));
-                }
-            }
-        } else {
-            cmd.arg("--full-env")
-                .arg("--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                .arg("--dir=/etc")
-                .arg("--dir=/bin")
-                .arg("--dir=/usr/bin")
-                .arg("--dir=/usr/local/bin")
-                .arg("--dir=/lib")
-                .arg("--dir=/lib64")
-                .arg("--dir=/usr/lib")
-                .arg("--dir=/usr/include");
-            for path in &config.mount_paths {
-                cmd.arg(format!("--dir={}", path));
-            }
+
+        // Use the language-specific chroot as the root filesystem
+        let lang_chroot = format!("/opt/evalx/chroots/{}", config.name);
+        cmd.arg(format!("--dir={}=/", lang_chroot));
+
+        // Essential system directories - mount from host
+        let essential_dirs = ["/dev", "/proc", "/sys", "/tmp", "/var", "/etc"];
+        for dir in essential_dirs.iter() {
+            cmd.arg(format!("--dir={}={}", dir, dir));
         }
 
-        cmd.arg("--cg")
-            .arg("--proc")
-            .arg(format!("--box-id={}", box_id))
-            .arg("--stdout=stdout.txt")
-            .arg("--stderr=stderr.txt")
-            .arg(format!("--time={}", time))
-            .arg(format!("--wall-time={}", time * 2))
-            .arg(format!("--fsize={}", 102400))
-            .arg(format!("--mem={}", mem))
-            .arg(format!("--processes={}", proc));
-        
+        // Set comprehensive PATH for common binary locations
+        cmd.arg("--env=PATH=/bin:/usr/bin:/usr/local/bin:/usr/sbin");
+
+        // Apply environment variables from config
         for (key, val) in &config.env_vars {
             cmd.arg(format!("--env={}={}", key, val));
         }
+
+        // Language-specific environment setup
+        match config.name.as_str() {
+            "python" => {
+                cmd.arg("--env=PYTHONPATH=/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages");
+            }
+            "javascript" => {
+                cmd.arg("--env=NODE_PATH=/usr/lib/nodejs:/usr/local/lib/node_modules");
+            }
+            "java11" | "java21" => {
+                cmd.arg("--env=JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64");
+            }
+            _ => {}
+        }
+
+        // Common isolate arguments
+        cmd.arg("--cg")
+            // FIX: The --cg-mem argument is now correctly paired with a value.
+            // This resolves the "Invalid numeric parameter" error.
+           .arg(format!("--cg-mem={}", mem))
+           .arg(format!("--box-id={}", box_id))
+           .arg("--stdout=stdout.txt")
+           .arg("--stderr=stderr.txt")
+           .arg(format!("--time={}", time))
+           .arg(format!("--wall-time={}", time * 2))
+           .arg(format!("--fsize={}", 1024 * 1024)) // 1GB file size limit
+           .arg(format!("--mem={}", mem))
+           .arg(format!("--processes={}", proc));
 
         cmd
     }
 
     async fn init_box(&self, box_id: u16) -> Result<()> {
         let output = Command::new("isolate")
-            .arg("--cg")
-            .arg(format!("--box-id={}", box_id))
-            .arg("--init")
-            .output()
-            .await?;
-        if !output.status.success() {
+           .arg("--cg")
+           .arg(format!("--box-id={}", box_id))
+           .arg("--init")
+           .output()
+           .await?;
+        if!output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("Failed to initialize isolate box {}: {}", box_id, stderr);
             return Err(anyhow!("Failed to initialize isolate box {}: {}", box_id, stderr));
@@ -320,14 +326,14 @@ impl IsolateSandbox {
 
     async fn cleanup_box(&self, box_id: u16) -> Result<()> {
         let output = Command::new("isolate")
-            .arg("--cg")
-            .arg(format!("--box-id={}", box_id))
-            .arg("--cleanup")
-            .output()
-            .await?;
-        if !output.status.success() {
+           .arg("--cg")
+           .arg(format!("--box-id={}", box_id))
+           .arg("--cleanup")
+           .output()
+           .await?;
+        if!output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.contains("No such file or directory") {
+            if!stderr.contains("No such file or directory") {
                 error!("Failed to cleanup isolate box {}: {}", box_id, stderr);
             }
         }

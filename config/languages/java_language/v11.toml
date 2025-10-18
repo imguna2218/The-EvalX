@@ -1,10 +1,10 @@
 is_compiled = true
 source_filename = "Main.java"
 executable_filename = "Main.class"
-
+chroot_path = "/opt/evalx/chroots/java11"
 [compile]
 command = [
-    "/usr/lib/jvm/java-11-openjdk-amd64/bin/javac",
+    "/usr/bin/javac", 
     "-J-XX:TieredStopAtLevel=1",
     "-J-Xms512m",
     "-J-Xmx512m",
@@ -17,7 +17,7 @@ limits = { time_s = 8, memory_kb = 1536000, processes = 150 } # 1.5GB
 
 [run]
 command = [
-    "/usr/lib/jvm/java-11-openjdk-amd64/bin/java",
+    "/usr/bin/java",
     "-Xms256m", "-Xmx256m",
     "-XX:MaxMetaspaceSize=64m",
     "-XX:ReservedCodeCacheSize=32m",
