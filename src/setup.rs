@@ -56,38 +56,21 @@ pub async fn initialize_executor(
     Ok((executor, tx, queue_manager))
 }
 
+// ENTIRE FUNCTION REPLACED
 pub async fn start_workers(
     queue_manager: Arc<QueueManager>,
     redis_client: RedisClient,
-    language_registry: Arc<LanguageRegistry>
+    worker_type: &str,
 ) {
-    let languages = language_registry.list_all();
-    
-    if languages.is_empty() {
-        error!("No language configurations were loaded. No workers will be started.");
-        return;
-    }
+    let queue_name = format!("{}-lane", worker_type);
+    info!("Spawning a dedicated worker for the '{}' queue.", queue_name);
 
-    for lang_config in languages {
-        let queue_manager_clone = queue_manager.clone();
-        let language_clone = lang_config.name.clone();
-        let version_clone = lang_config.version.clone();
-        let redis_client_clone = redis_client.clone();
-        
-        tokio::spawn(async move {
-            info!(
-                "Worker spawned for language: {}, version: {}",
-                language_clone, version_clone
-            );
-            if let Err(e) = queue_manager_clone
-                .start_worker(language_clone.clone(), version_clone.clone(), redis_client_clone)
-                .await
-            {
-                error!(
-                    "Worker failed for language: {}, version: {}: {}",
-                    language_clone, version_clone, e
-                );
-            }
-        });
-    }
+    tokio::spawn(async move {
+        if let Err(e) = queue_manager
+           .start_worker(queue_name.clone(), redis_client)
+           .await
+        {
+            error!("Worker for queue '{}' failed: {}", queue_name, e);
+        }
+    });
 }

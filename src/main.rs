@@ -103,8 +103,15 @@ async fn main() -> Result<()> {
 
 
     if mode == "worker" {
-        info!("Starting in WORKER mode");
-        start_workers(queue_manager, redis_client, executor.language_registry.clone()).await;
+        // CHANGED: Workers now require a specific type ('fast' or 'jvm').
+        let worker_type = args.get(2).map(String::as_str).unwrap_or("");
+        if worker_type!= "fast" && worker_type!= "jvm" {
+            error!("FATAL: Invalid or missing worker type. Must be 'fast' or 'jvm'.");
+            panic!("Usage:./target/release/evalx worker <fast|jvm>");
+        }
+
+        info!("Starting in WORKER mode, type: {}", worker_type);
+        start_workers(queue_manager, redis_client, worker_type).await;
         signal::ctrl_c().await?;
         info!("Worker shutting down gracefully");
     } else {

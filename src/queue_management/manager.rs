@@ -21,6 +21,7 @@ pub struct QueueManager {
     executor: Arc<CodeExecutor>,
     redis_client: RedisClient,
     notification_tx: Arc<broadcast::Sender<ExecutionNotification>>,
+    jvm_languages: Vec<String>,
 }
 
 impl QueueManager {
@@ -28,12 +29,16 @@ impl QueueManager {
     
         
     pub fn new(executor: Arc<CodeExecutor>, redis_client: RedisClient, notification_tx: Arc<broadcast::Sender<ExecutionNotification>>) -> Self {
+        let jvm_langs_str = env::var("JVM_LANE_LANGUAGES").unwrap_or_else(|_| "java11,java21".to_string());
+        let jvm_languages = jvm_langs_str.split(',').map(|s| s.trim().to_string()).collect();
+        info!("Configured JVM-Lane languages: {:?}", jvm_languages);
         QueueManager {
             queue: crate::queue_management::ExecutionQueue::new(redis_client.clone()),
             tasks: Arc::new(RwLock::new(std::collections::HashMap::new())),
             executor,
             redis_client,
             notification_tx,
+            jvm_languages,
         }
     }
 
@@ -64,12 +69,19 @@ impl QueueManager {
         };
 
         let serialized_task = serde_json::to_string(&task)?;
-        let queue_key = format!("queue:{}:{}", language, version);
-        let priority_key = format!("priority:{}:{}", language, version);
-        let status_key = format!("status:{}", &task_id);
+        // CHANGED: Route tasks to one of two queues based on language.
+        let queue_name = if self.jvm_languages.contains(&language) {
+            "jvm-lane"
+        } else {
+            "fast-lane"
+        };
 
-        // ADDED: Increment the queue depth gauge for the specific language.
-        QUEUE_DEPTH.with_label_values(&[&format!("{}:{}", language, version)]).inc();
+        let queue_key = format!("queue:{}", queue_name);
+        let priority_key = format!("priority:{}", queue_name);
+
+        let status_key = format!("status:{}", &task_id);
+        // CHANGED: Increment the queue depth gauge for the specific lane.
+        QUEUE_DEPTH.with_label_values(&[queue_name]).inc();
 
         let mut conn = redis_client.get_multiplexed_async_connection().await?;
 
@@ -82,15 +94,14 @@ impl QueueManager {
         Ok(task_id)
     }
 
-    pub async fn start_worker(&self, language: String, version: String, redis_client: RedisClient) -> Result<(), anyhow::Error> {
+    pub async fn start_worker(&self, queue_name: String, redis_client: RedisClient) -> Result<(), anyhow::Error> {
         let result_ttl: usize = env::var("RESULT_TTL_SECONDS")
         .unwrap_or_else(|_| "200".to_string())
         .parse()
         .unwrap_or(200);
-        info!("Starting worker for language: {}, version: {}", language, version);
-        let language_version = format!("{}:{}", language, version);
-        let queue_key = format!("queue:{}", language_version);
-        let priority_key = format!("priority:{}", language_version);
+        info!("Starting worker for queue: {}", queue_name);
+        let queue_key = format!("queue:{}", queue_name);
+        let priority_key = format!("priority:{}", queue_name);
         
         // MODIFIED: Load configuration from environment variables once.
         let max_retries: u8 = env::var("MAX_RETRIES").unwrap_or_else(|_| "3".to_string()).parse()?;
@@ -116,9 +127,8 @@ impl QueueManager {
             };
             
             if let Some((_, task_id)) = result {
-                QUEUE_DEPTH.with_label_values(&[&language_version]).dec();
-
-                info!("Dequeued task: {}, language: {}, version: {}", task_id, language, version);
+                QUEUE_DEPTH.with_label_values(&[&queue_name]).dec();
+                info!("Dequeued task: {} from queue: {}", task_id, queue_name);
                 let status_key = format!("status:{}", &task_id);
                 
                 if let Err(e) = conn.zrem::<_, _, ()>(&priority_key, &task_id).await {
@@ -151,8 +161,8 @@ impl QueueManager {
                     // CORRECTED: Calculate and record queue wait time using the task's timestamp.
                     let now_unix = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)?.as_secs();
                     let wait_time = now_unix.saturating_sub(task.created_at);
-                    crate::monitoring::metrics::QUEUE_WAIT_TIME_SECONDS.with_label_values(&[&language_version]).observe(wait_time as f64);
-
+                    crate::monitoring::metrics::QUEUE_WAIT_TIME_SECONDS.with_label_values(&[&queue_name]).observe(wait_time as f64);
+                    
                     if let Err(e) = conn.set::<_, _, ()>(&status_key, "processing").await {
                         error!("Failed to set status to processing for task {}: {}", task_id, e);
                         continue;
