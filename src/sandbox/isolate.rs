@@ -71,6 +71,8 @@ impl IsolateSandbox {
             let execution_future = child.wait_with_output();
             let timeout_duration = Duration::from_secs(time_limit_s + 2);
 
+            // located inside the `compile` function, within the `async` block
+
             let output = match tokio::time::timeout(timeout_duration, execution_future).await {
                 Ok(Ok(output)) => output,
                 Ok(Err(e)) => return Err(anyhow!("Compile process failed: {}", e)),
@@ -79,7 +81,16 @@ impl IsolateSandbox {
                     if let Err(e) = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await {
                         error!("Failed to kill runaway compile process with PID {}: {}", child_id, e);
                     }
-                    return Err(anyhow!("Compiler process hung and was terminated."));
+                    // ADDED: Give the OS a moment to release locks after the kill signal.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+
+                    // CHANGED: Return a proper CompilationResult indicating timeout, not a system error.
+                    return Ok(CompilationResult {
+                        success: false,
+                        compile_time: time_limit_s as f64,
+                        binary: None,
+                        stderr: "Compilation timed out.".to_string(),
+                    });
                 }
             };
 
@@ -167,6 +178,8 @@ impl IsolateSandbox {
             let execution_future = child.wait_with_output();
             let timeout_duration = Duration::from_secs(time_limit_s + 2);
             
+            // located inside the `run` function, within the `async` block
+
             let output = match tokio::time::timeout(timeout_duration, execution_future).await {
                 Ok(Ok(output)) => output,
                 Ok(Err(e)) => return Err(anyhow!("Run process failed: {}", e)),
@@ -175,6 +188,9 @@ impl IsolateSandbox {
                     if let Err(e) = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await {
                         error!("Failed to kill runaway run process with PID {}: {}", child_id, e);
                     }
+                    // ADDED: Give the OS a moment to release locks after the kill signal.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+
                     return Ok(RunResult {
                         stdout: String::new(),
                         stderr: "Time Limit Exceeded".to_string(),
