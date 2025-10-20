@@ -21,7 +21,6 @@ pub struct QueueManager {
     executor: Arc<CodeExecutor>,
     redis_client: RedisClient,
     notification_tx: Arc<broadcast::Sender<ExecutionNotification>>,
-    jvm_languages: Vec<String>,
 }
 
 impl QueueManager {
@@ -29,19 +28,14 @@ impl QueueManager {
     
         
     pub fn new(executor: Arc<CodeExecutor>, redis_client: RedisClient, notification_tx: Arc<broadcast::Sender<ExecutionNotification>>) -> Self {
-        let jvm_langs_str = env::var("JVM_LANE_LANGUAGES").unwrap_or_else(|_| "java11,java21".to_string());
-        let jvm_languages = jvm_langs_str.split(',').map(|s| s.trim().to_string()).collect();
-        info!("Configured JVM-Lane languages: {:?}", jvm_languages);
         QueueManager {
             queue: crate::queue_management::ExecutionQueue::new(redis_client.clone()),
             tasks: Arc::new(RwLock::new(std::collections::HashMap::new())),
             executor,
             redis_client,
             notification_tx,
-            jvm_languages,
         }
     }
-
     pub async fn add_task(
         &self,
         requests: Vec<ExecutionRequest>,
@@ -70,17 +64,14 @@ impl QueueManager {
 
         let serialized_task = serde_json::to_string(&task)?;
         // CHANGED: Route tasks to one of two queues based on language.
-        let queue_name = if self.jvm_languages.contains(&language) {
-            "jvm-lane"
-        } else {
-            "fast-lane"
-        };
+        // All tasks now go to a single, unified queue.
+        let queue_name = "evalx_jobs";
 
         let queue_key = format!("queue:{}", queue_name);
         let priority_key = format!("priority:{}", queue_name);
 
         let status_key = format!("status:{}", &task_id);
-        // CHANGED: Increment the queue depth gauge for the specific lane.
+        // Increment the queue depth gauge for the unified queue.
         QUEUE_DEPTH.with_label_values(&[queue_name]).inc();
 
         let mut conn = redis_client.get_multiplexed_async_connection().await?;

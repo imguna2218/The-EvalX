@@ -2,6 +2,7 @@ is_compiled = true
 source_filename = "Main.java"
 executable_filename = "Main.class"
 chroot_path = "/opt/evalx/chroots/java21"
+
 [compile]
 command = [
     "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",

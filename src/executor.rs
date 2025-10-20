@@ -1,3 +1,7 @@
+use tokio::process::Command;
+use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
+use tokio::fs;
 use anyhow::{anyhow, Result};
 use futures_util::future;
 use hex::ToHex;
@@ -16,6 +20,7 @@ use crate::types::index::{CodeExecutor, ConcurrencyState};
 use std::env;
 
 impl CodeExecutor {
+    
     async fn warmup_java_environment(&self) -> Result<()> {
         info!("Attempting to warm up Java environment...");
         let lang_key = "java:21";
@@ -177,22 +182,6 @@ impl CodeExecutor {
             // This allows the system to attempt recovery through retries
         }
 
-        
-        if base_language.starts_with("java") {
-            let now = Instant::now();
-            let last_warmup = *self.last_java_warmup.read().await;
-            if now.duration_since(last_warmup) > Duration::from_secs(120) {
-                info!("Triggering Java environment warm-up");
-                let executor_clone = self.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = executor_clone.warmup_java_environment().await {
-                        warn!("Background Java warm-up failed: {}", e);
-                    } else {
-                        *executor_clone.last_java_warmup.write().await = Instant::now();
-                    }
-                });
-            }
-        }
 
         info!(
             "Executing Isolate batch for language: {}, with {} test cases",
@@ -242,6 +231,7 @@ impl CodeExecutor {
         }
 
         let shared_artifact = Arc::new(artifact);
+        
         let default_timeout: u64 = env::var("DEFAULT_TIMEOUT")
             .unwrap_or_else(|_| "10".to_string())
             .parse()

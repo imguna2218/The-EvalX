@@ -75,43 +75,22 @@ impl RedisClient {
 
     /// ADDED: Diagnostic method to check pool status
     pub async fn diagnose_pool_health(&self) -> Result<()> {
-        const POOL_KEY: &str = "evalx:sandbox_ids:available";
+        const POOL_KEY: &str = "evalx:sandboxes:ready";
         let mut conn = self.get_conn().await?;
         
-        let pool_size: u64 = conn.scard(POOL_KEY).await?;
-        let in_use_estimate = 1000 - pool_size; // Assuming 1000 total IDs
+        let pool_size: u64 = conn.llen(POOL_KEY).await?;
+        let in_use_estimate = 50 - pool_size;
         
         info!("Sandbox Pool Diagnostics - Available: {}, Estimated In Use: {}", pool_size, in_use_estimate);
         
         if pool_size == 0 {
             error!("CRITICAL: Sandbox pool is completely empty!");
-            // Try to recover by reinitializing the pool
-            self.emergency_pool_recovery().await?;
         }
         
         Ok(())
     }
 
     /// ADDED: Emergency recovery for pool exhaustion
-    pub async fn emergency_pool_recovery(&self) -> Result<()> {
-        const POOL_KEY: &str = "evalx:sandbox_ids:available";
-        const POOL_SIZE: u16 = 1000;
-        
-        warn!("Attempting emergency sandbox pool recovery...");
-        let mut conn = self.get_multiplexed_async_connection().await?;
-        
-        // Clear and repopulate the pool
-        conn.del(POOL_KEY).await?;
-        
-        let mut pipe = redis::pipe();
-        for i in 0..POOL_SIZE {
-            pipe.sadd(POOL_KEY, i);
-        }
-        pipe.query_async(&mut conn).await?;
-        
-        info!("Emergency pool recovery completed - {} IDs added", POOL_SIZE);
-        Ok(())
-    }
 
     // MODIFIED: Made the function public so other modules can access it.
     pub async fn get_conn(&self) -> Result<Connection<RedisConnectionManager>> {

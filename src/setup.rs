@@ -30,9 +30,8 @@ pub async fn initialize_executor(
 
     let executor = Arc::new(CodeExecutor {
         semaphore: Arc::new(Semaphore::new(max_sandboxes)),
-        last_java_warmup: Arc::new(RwLock::new(Instant::now())),
         system: Arc::new(Mutex::new(System::new_all())),
-        redis_client: redis_client.clone(), // This now correctly uses the client passed into the function.
+        redis_client: redis_client.clone(), 
         concurrency_state: Arc::new(RwLock::new((
             ConcurrencyState::Nominal,
             Instant::now(),
@@ -56,21 +55,34 @@ pub async fn initialize_executor(
     Ok((executor, tx, queue_manager))
 }
 
-// ENTIRE FUNCTION REPLACED
+
 pub async fn start_workers(
     queue_manager: Arc<QueueManager>,
     redis_client: RedisClient,
-    worker_type: &str,
 ) {
-    let queue_name = format!("{}-lane", worker_type);
-    info!("Spawning a dedicated worker for the '{}' queue.", queue_name);
+    // Automatically detect the number of CPU cores and spawn one worker for each.
+    let num_workers = num_cpus::get().max(1);
+    let queue_name = "evalx_jobs".to_string();
+    info!(
+        "Spawning {} identical workers for the unified '{}' queue.",
+        num_workers, queue_name
+    );
 
-    tokio::spawn(async move {
-        if let Err(e) = queue_manager
-           .start_worker(queue_name.clone(), redis_client)
-           .await
-        {
-            error!("Worker for queue '{}' failed: {}", queue_name, e);
-        }
-    });
+    let mut handles = Vec::new();
+
+    for i in 0..num_workers {
+        let manager_clone = queue_manager.clone();
+        let client_clone = redis_client.clone();
+        let q_name = queue_name.clone();
+        let handle = tokio::spawn(async move {
+            info!("Worker #{} starting...", i + 1);
+            if let Err(e) = manager_clone.start_worker(q_name, client_clone).await {
+                error!("Worker #{} failed: {}", i + 1, e);
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Keep the main worker process alive by waiting on all spawned tasks.
+    futures_util::future::join_all(handles).await;
 }
