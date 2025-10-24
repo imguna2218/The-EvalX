@@ -27,7 +27,7 @@ impl PrewarmedSandbox {
 
         // Use LPOP instead of BRPOP for immediate availability check
         let box_id: Option<u16> = conn.lpop(READY_POOL_KEY, None).await?;
-        
+
         match box_id {
             Some(box_id) => {
                 debug!("Acquired pre-warmed sandbox ID {}", box_id);
@@ -93,8 +93,7 @@ impl IsolateSandbox {
         let execution_result = async {
             let start_time = Instant::now();
 
-            
-
+            // --- THIS IS THE ORIGINAL LOGIC ---
             let limits = config.compile.limits.clone().unwrap_or_default();
             let time_limit_s = limits.time_s;
             let mem_limit_kb = limits.memory_kb;
@@ -113,26 +112,38 @@ impl IsolateSandbox {
             let execution_future = child.wait_with_output();
             let timeout_duration = Duration::from_secs(time_limit_s + 2);
 
-            let output = match tokio::time::timeout(timeout_duration, execution_future).await {
-                Ok(Ok(output)) => output,
+            // --- Start Change 2: Log isolate's errors during compile ---
+            // Store the result of the timeout first
+            let output_result = tokio::time::timeout(timeout_duration, execution_future).await;
+
+            // Now match on the timeout result
+            let output = match output_result {
+                Ok(Ok(output)) => {
+                    // Log isolate's own stderr IF IT'S NOT EMPTY
+                    let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
+                    if !isolate_stderr_str.is_empty() {
+                        // Use warn level, might not be a fatal error for isolate itself
+                        warn!("Isolate stderr (compile, box {}): {}", box_id, isolate_stderr_str);
+                    }
+                    output // Continue with the output
+                }
                 Ok(Err(e)) => return Err(anyhow!("Compile process failed: {}", e)),
-                Err(_) => {
+                Err(_) => { // Timeout occurred
                     error!(
-                        "Compile command for '{}' (PID: {}) timed out. Attempting to kill.",
-                        config.name, child_id
+                        "Compile command for '{}' (PID: {}) timed out after {:?}. Attempting to kill.",
+                        config.name, child_id, timeout_duration // Added timeout duration to log
                     );
+                    // Kill process logic... (keep as is)
                     if let Err(e) = Command::new("kill")
                       .arg("-9")
                       .arg(child_id.to_string())
                       .status()
                       .await
                     {
-                        error!(
-                            "Failed to kill runaway compile process with PID {}: {}",
-                            child_id, e
-                        );
+                        error!("Failed to kill runaway compile process with PID {}: {}", child_id, e);
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                    // Return timeout result... (keep as is)
                     return Ok(CompilationResult {
                         success: false,
                         compile_time: time_limit_s as f64,
@@ -141,9 +152,11 @@ impl IsolateSandbox {
                     });
                 }
             };
+            // --- End Change 2 ---
 
             let compile_time = start_time.elapsed().as_secs_f64();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            // We capture isolate's stderr here regardless, might be useful even on success
+            let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
             if output.status.success() ||!config.is_compiled {
                 let binary = if!config.is_compiled {
@@ -155,14 +168,17 @@ impl IsolateSandbox {
                     success: true,
                     compile_time,
                     binary: Some(binary),
-                    stderr,
+                    // Return isolate's stderr even on success for debugging, can be empty
+                    stderr: isolate_stderr,
                 })
             } else {
+                // If compile fails, log it clearly and return isolate's stderr as the reason
+                error!("Compilation failed for '{}' (Box {}). Isolate stderr: {}", config.name, box_id, isolate_stderr);
                 Ok(CompilationResult {
                     success: false,
                     compile_time,
                     binary: None,
-                    stderr,
+                    stderr: isolate_stderr, // Use isolate's stderr as the primary error message
                 })
             }
         }
@@ -212,55 +228,63 @@ impl IsolateSandbox {
             let execution_future = child.wait_with_output();
             let timeout_duration = Duration::from_secs(time_limit_s + 2);
 
-            let output = match tokio::time::timeout(timeout_duration, execution_future).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => return Err(anyhow!("Run process failed: {}", e)),
-                Err(_) => {
-                    error!(
-                        "Run command for '{}' (PID: {}) timed out. Attempting to kill.",
-                        config.name, child_id
-                    );
-                    if let Err(e) = Command::new("kill")
-                      .arg("-9")
-                      .arg(child_id.to_string())
-                      .status()
-                      .await
-                    {
-                        error!(
-                            "Failed to kill runaway run process with PID {}: {}",
-                            child_id, e
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    return Ok(RunResult {
-                        stdout: String::new(),
-                        stderr: "Time Limit Exceeded".to_string(),
-                        exit_code: -1,
-                        run_time: time_limit_s as f64,
-                        wall_time: 0.0,
-                        memory_used_kb: 0,
-                        status: "TO".to_string(),
-                    });
-                }
-            };
+            // --- Start Change 3: Log isolate's errors during run ---
+            // Store the result of the timeout first
+            let output_result = tokio::time::timeout(timeout_duration, execution_future).await;
 
-            let program_stdout = fs::read_to_string(format!("{}/stdout.txt", box_path))
-              .await
-              .unwrap_or_default();
-            let program_stderr = fs::read_to_string(format!("{}/stderr.txt", box_path))
-              .await
-              .unwrap_or_else(|_| "".to_string());
-            let meta_content = fs::read_to_string(&meta_file_path)
-              .await
-              .unwrap_or_else(|_| "status:XX".to_string());
+            // Now match on the timeout result
+            let output = match output_result {
+                 Ok(Ok(output)) => {
+                    // Log isolate's own stderr IF IT'S NOT EMPTY
+                    let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
+                    if !isolate_stderr_str.is_empty() {
+                        // Use warn level, might not be a fatal error for isolate itself
+                        warn!("Isolate stderr (run, box {}): {}", box_id, isolate_stderr_str);
+                    }
+                    output // Continue with the output
+                 }
+                 Ok(Err(e)) => return Err(anyhow!("Run process failed: {}", e)),
+                 Err(_) => { // Timeout occurred
+                    error!(
+                        "Run command for '{}' (PID: {}) timed out after {:?}. Attempting to kill.",
+                        config.name, child_id, timeout_duration // Added timeout duration to log
+                    );
+                     // Kill process logic... (keep as is)
+                     if let Err(e) = Command::new("kill")
+                       .arg("-9")
+                       .arg(child_id.to_string())
+                       .status()
+                       .await
+                     {
+                         error!("Failed to kill runaway run process with PID {}: {}", child_id, e);
+                     }
+                     tokio::time::sleep(Duration::from_millis(50)).await;
+                     // Return timeout result... (keep most fields, update runtime/walltime)
+                     return Ok(RunResult {
+                         stdout: String::new(),
+                         stderr: "Time Limit Exceeded".to_string(),
+                         exit_code: -1, // Consistent exit code for TLE
+                         run_time: time_limit_s as f64, // Use the limit as runtime on TO
+                         wall_time: (time_limit_s * 2) as f64, // Reflect wall time limit approx
+                         memory_used_kb: 0, // No reliable memory usage on TO
+                         status: "TO".to_string(),
+                     });
+                 }
+            };
+            // --- End Change 3 (Part 1/2) ---
+
+            // Read program outputs and metadata (keep as is)
+            let program_stdout = fs::read_to_string(format!("{}/stdout.txt", box_path)).await.unwrap_or_default();
+            let program_stderr = fs::read_to_string(format!("{}/stderr.txt", box_path)).await.unwrap_or_else(|_| "".to_string());
+            let meta_content = fs::read_to_string(&meta_file_path).await.unwrap_or_else(|_| "status:XX".to_string());
             let _ = fs::remove_file(&meta_file_path).await;
 
+            // Parse meta (keep as is)
             let mut run_time = 0.0;
             let mut wall_time = 0.0;
             let mut memory_used_kb = 0;
             let mut status = "Unknown".to_string();
-
-            for line in meta_content.lines() {
+            for line in meta_content.lines() { /* ... keep parsing logic ... */
                 if let Some((key, value)) = line.split_once(':') {
                     match key {
                         "time" => run_time = value.parse().unwrap_or(0.0),
@@ -272,27 +296,55 @@ impl IsolateSandbox {
                 }
             }
 
+
+            // If status is Time Out, ensure runtime reflects the limit (keep as is)
             if status == "TO" {
                 run_time = time_limit_s as f64;
             }
 
+            // --- Start Change 3: Improve final stderr ---
+            // Get isolate's own stderr output
             let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let final_stderr = if status == "TO" {
-                "Time Limit Exceeded".to_string()
-            } else if!program_stderr.is_empty() {
-                program_stderr
-            } else {
-                isolate_stderr
+
+            // Determine the final stderr message based on status and available outputs
+            let final_stderr = match status.as_str() {
+                "TO" => "Time Limit Exceeded".to_string(), // Explicit TLE message
+                "SG" | "RE" | "XX" => { // Signal, Runtime Error, Internal Error from isolate
+                    // Prioritize program's stderr if it exists
+                    if !program_stderr.is_empty() {
+                        program_stderr
+                    // Otherwise, use isolate's stderr if it exists
+                    } else if !isolate_stderr.is_empty() {
+                        format!("Runtime Error (isolate: {})", isolate_stderr)
+                    // Fallback to just reporting the status code
+                    } else {
+                        format!("Runtime Error (status: {})", status)
+                    }
+                }
+                // For any other status (like normal exit "OK")
+                _ => {
+                    // Still return program stderr if it exists (e.g., warnings printed)
+                    if !program_stderr.is_empty() {
+                        program_stderr
+                    // Otherwise, return an empty string for successful runs without stderr
+                    } else {
+                        // Optionally include isolate_stderr even on success if needed for deep debugging
+                        // isolate_stderr // <-- Uncomment this if you ALWAYS want to see isolate's stderr output
+                        "".to_string() // <-- Keep it clean for normal successful runs
+                    }
+                }
             };
+            // --- End Change 3 (Part 2/2) ---
+
 
             Ok(RunResult {
                 stdout: program_stdout,
-                stderr: final_stderr,
-                exit_code: output.status.code().unwrap_or(-1) as i64,
+                stderr: final_stderr, // Use the new improved final_stderr
+                exit_code: output.status.code().unwrap_or(-1) as i64, // Use isolate's exit code
                 run_time,
                 wall_time,
                 memory_used_kb,
-                status,
+                status, // Include the raw isolate status code
             })
         }
       .await;
@@ -300,53 +352,60 @@ impl IsolateSandbox {
     }
 
     fn build_base_command(
-        &self,
-        box_id: u16,
-        config: &LanguageConfig,
-        time: u64,
-        mem: u64,
-        proc: u64,
-    ) -> Command {
-        let mut cmd = Command::new("isolate");
+    &self,
+    box_id: u16,
+    config: &LanguageConfig,
+    time: u64,
+    mem: u64,
+    proc: u64,
+) -> Command {
+    let mut cmd = Command::new("isolate");
 
-        let lang_chroot = format!("/opt/evalx/chroots/{}", config.name);
-        cmd.arg(format!("--dir={}=/", lang_chroot));
-
-        let essential_dirs = ["/dev", "/proc", "/sys", "/tmp", "/var", "/etc"];
-        for dir in essential_dirs.iter() {
-            cmd.arg(format!("--dir={}={}", dir, dir));
+    if let Some(chroot_path) = &config.chroot_path {
+        if std::path::Path::new(chroot_path).exists() {
+            cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
+            cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
+            cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
+            cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
         }
-
-        cmd.arg("--env=PATH=/bin:/usr/bin:/usr/local/bin:/usr/sbin");
-
-        for (key, val) in &config.env_vars {
-            cmd.arg(format!("--env={}={}", key, val));
-        }
-
-        match config.name.as_str() {
-            "python" => {
-                cmd.arg("--env=PYTHONPATH=/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages");
-            }
-            "javascript" => {
-                cmd.arg("--env=NODE_PATH=/usr/lib/nodejs:/usr/local/lib/node_modules");
-            }
-            "java11" | "java21" => {
-                cmd.arg("--env=JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64");
-            }
-            _ => {}
-        }
-
-        cmd.arg("--cg")
-          .arg(format!("--cg-mem={}", mem))
-          .arg(format!("--box-id={}", box_id))
-          .arg("--stdout=stdout.txt")
-          .arg("--stderr=stderr.txt")
-          .arg(format!("--time={}", time))
-          .arg(format!("--wall-time={}", time * 2))
-          .arg(format!("--fsize={}", 1024 * 1024))
-          .arg(format!("--mem={}", mem))
-          .arg(format!("--processes={}", proc));
-
-        cmd
     }
+
+    let essential_dirs = ["/dev", "/proc", "/sys", "/tmp", "/var", "/etc"];
+    for dir in essential_dirs.iter() {
+        cmd.arg(format!("--dir={}={}", dir, dir));
+    }
+
+    cmd.arg("--env=PATH=/bin:/usr/bin:/usr/local/bin:/usr/sbin");
+
+    for (key, val) in &config.env_vars {
+        cmd.arg(format!("--env={}={}", key, val));
+    }
+
+    match config.name.as_str() {
+        "python" => {
+            cmd.arg("--env=PYTHONPATH=/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages");
+        }
+        "javascript" => {
+            cmd.arg("--env=NODE_PATH=/usr/lib/nodejs:/usr/local/lib/node_modules");
+        }
+        "java11" | "java21" => {
+            cmd.arg("--env=JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64");
+        }
+        _ => {}
+    }
+
+    cmd.arg("--cg")
+      .arg(format!("--cg-mem={}", mem))
+      .arg(format!("--box-id={}", box_id))
+      .arg("--stdout=stdout.txt")
+      .arg("--stderr=stderr.txt")
+      .arg(format!("--time={}", time))
+      .arg(format!("--wall-time={}", time * 2))
+      .arg(format!("--fsize={}", 1024 * 1024)) // 1GB file size limit
+      .arg(format!("--mem={}", mem))
+      .arg(format!("--processes={}", proc))
+      .arg("-v");
+
+    cmd
+}
 }

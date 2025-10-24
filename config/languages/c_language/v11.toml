@@ -1,14 +1,12 @@
 is_compiled = true
 source_filename = "main.c"
 executable_filename = "main"
+chroot_path = "/opt/dev-chroot"
 
 [compile]
-command = ["/usr/bin/gcc", "-o", "main", "main.c"]
+command = ["/usr/bin/gcc", "-O3", "-o", "main", "main.c", "-lm"]
+limits = { time_s = 10, memory_kb = 1048576, processes = 500 }
 
 [run]
 command = ["./main"]
-
-[limits]
-time_s = 10
-memory_kb = 262144 # 256MB
-processes = 10
+limits = { time_s = 10, memory_kb = 1048576, processes = 500 }

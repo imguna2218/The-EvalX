@@ -40,18 +40,18 @@ async fn initialize_sandbox_pool(redis_client: &RedisClient) -> Result<()> {
     let mut pipe = redis::pipe();
     for i in 0..POOL_SIZE {
         // Clean up any existing box first
+        // Clean up any existing box first
         let _ = tokio::process::Command::new("isolate")
-            .arg("--cg")
-            .arg(format!("--box-id={}", i))
-            .arg("--cleanup")
-            .status().await;
-        
+        .arg("--cg")
+        .arg(format!("--box-id={}", i))
+        .arg("--cleanup")
+        .status().await;
         // Initialize the box
         let init_status = tokio::process::Command::new("isolate")
-            .arg("--cg")
-            .arg(format!("--box-id={}", i))
-            .arg("--init")
-            .status().await;
+        .arg("--cg")
+        .arg(format!("--box-id={}", i))
+        .arg("--init")
+        .status().await;
         
         if init_status.is_ok() && init_status.unwrap().success() {
             pipe.rpush(READY_POOL_KEY, i);
@@ -118,64 +118,20 @@ async fn main() -> Result<()> {
     let (executor, tx, queue_manager) = initialize_executor(redis_client.clone()).await?;
 
     // ADDED: Initialize the sandbox ID pool in Redis before starting services.
-    if let Err(e) = initialize_sandbox_pool(&redis_client).await {
-        error!(
-            "FATAL: Could not initialize the sandbox pool in Redis: {}. Shutting down.",
-            e
-        );
-        // This is a critical failure. The system cannot function without the sandbox pool.
-        panic!("Failed to initialize sandbox pool: {}", e);
+    // MODIFIED: Only initialize sandbox pool in worker mode
+    if mode == "worker" {
+        if let Err(e) = initialize_sandbox_pool(&redis_client).await {
+            error!(
+                "FATAL: Could not initialize the sandbox pool in Redis: {}. Shutting down.",
+                e
+            );
+            panic!("Failed to initialize sandbox pool: {}", e);
+        }
+    } else {
+        info!("API Server mode: Sandbox pool initialization skipped (handled by worker)");
     }
 
-    let manager_client = redis_client.clone();
-    tokio::spawn(async move {
-        info!("Starting Sandbox Manager (recycling) task...");
-        const READY_POOL_KEY: &str = "evalx:sandboxes:ready";
-        const CLEANUP_POOL_KEY: &str = "evalx:sandboxes:cleanup";
-
-        loop {
-            let mut conn = match manager_client.get_multiplexed_async_connection().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("Sandbox Manager failed to get Redis connection: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-
-            // Use LPOP instead of BRPOP for cleanup queue
-            let box_id: Option<u16> = conn.lpop(CLEANUP_POOL_KEY, None).await.unwrap_or(None);
-            
-            if let Some(box_id) = box_id {
-                debug!("Sandbox Manager: Recycling box #{}", box_id);
-                
-                // Cleanup the used box
-                let _ = tokio::process::Command::new("isolate")
-                    .arg("--cg")
-                    .arg(format!("--box-id={}", box_id))
-                    .arg("--cleanup")
-                    .status().await;
-
-                // Re-initialize it to make it pristine
-                let init_status = tokio::process::Command::new("isolate")
-                    .arg("--cg")
-                    .arg(format!("--box-id={}", box_id))
-                    .arg("--init")
-                    .status().await;
-
-                // If successful, return it to the ready pool
-                if init_status.is_ok() && init_status.unwrap().success() {
-                    let _: Result<(),_> = conn.rpush(READY_POOL_KEY, box_id).await;
-                    debug!("Sandbox Manager: Box #{} is now ready.", box_id);
-                } else {
-                    error!("Sandbox Manager: Failed to re-initialize box #{}. It will not be returned to the pool.", box_id);
-                }
-            } else {
-                // No boxes to clean, sleep briefly
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-    });
+    
 
     let health_client = redis_client.clone();
     tokio::spawn(async move {
@@ -191,6 +147,55 @@ async fn main() -> Result<()> {
 
     if mode == "worker" {
         info!("Starting in WORKER mode");
+        let manager_client = redis_client.clone();
+        tokio::spawn(async move {
+            info!("Starting Sandbox Manager (recycling) task...");
+            const READY_POOL_KEY: &str = "evalx:sandboxes:ready";
+            const CLEANUP_POOL_KEY: &str = "evalx:sandboxes:cleanup";
+
+            loop {
+                let mut conn = match manager_client.get_multiplexed_async_connection().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Sandbox Manager failed to get Redis connection: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+
+                // Use LPOP instead of BRPOP for cleanup queue
+                let box_id: Option<u16> = conn.lpop(CLEANUP_POOL_KEY, None).await.unwrap_or(None);
+                
+                if let Some(box_id) = box_id {
+                    debug!("Sandbox Manager: Recycling box #{}", box_id);
+                    
+                    // Clean up any existing box first
+// Cleanup the used box
+                    let _ = tokio::process::Command::new("isolate")
+                        .arg("--cg")
+                        .arg(format!("--box-id={}", box_id))
+                        .arg("--cleanup")
+                        .status().await;
+                    // Re-initialize it to make it pristine
+                    let init_status = tokio::process::Command::new("isolate")
+                        .arg("--cg")
+                        .arg(format!("--box-id={}", box_id))
+                        .arg("--init")
+                        .status().await;
+
+                    // If successful, return it to the ready pool
+                    if init_status.is_ok() && init_status.unwrap().success() {
+                        let _: Result<(),_> = conn.rpush(READY_POOL_KEY, box_id).await;
+                        debug!("Sandbox Manager: Box #{} is now ready.", box_id);
+                    } else {
+                        error!("Sandbox Manager: Failed to re-initialize box #{}. It will not be returned to the pool.", box_id);
+                    }
+                } else {
+                    // No boxes to clean, sleep briefly
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        });
         // The worker type is no longer needed. All workers are now identical.
         start_workers(queue_manager, redis_client).await;
         signal::ctrl_c().await?;

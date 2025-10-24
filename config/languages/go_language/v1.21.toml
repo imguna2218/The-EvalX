@@ -1,7 +1,7 @@
 is_compiled = true
 source_filename = "main.go"
 executable_filename = "main"
-chroot_path = "/opt/evalx/chroots/go"
+chroot_path = "/opt/evalx/runtimes/go-v1.21"
 
 [compile]
 command = ["/usr/bin/go", "build", "-o", "main", "main.go"]

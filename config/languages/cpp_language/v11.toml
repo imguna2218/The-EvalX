@@ -1,14 +1,12 @@
 is_compiled = true
 source_filename = "main.cpp"
 executable_filename = "main"
+chroot_path = "/opt/dev-chroot"
 
 [compile]
-command = ["/usr/bin/g++", "-o", "main", "main.cpp"]
+command = ["/usr/bin/g++", "-O3", "-o", "main", "main.cpp", "-lm"]
+limits = { time_s = 10, memory_kb = 1048576, processes = 500 }
 
 [run]
 command = ["./main"]
-
-[limits]
-time_s = 10
-memory_kb = 262144 # 256MB
-processes = 10
+limits = { time_s = 10, memory_kb = 1048576, processes = 500 }

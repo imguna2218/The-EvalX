@@ -1,15 +1,10 @@
 is_compiled = false
 source_filename = "main.py"
 executable_filename = "main.py"
-chroot_path = "/opt/evalx/chroots/python"
 
 [compile]
 command = ["echo", "no-compile"]
 
 [run]
 command = ["/usr/bin/python3", "main.py"]  # Use python3 instead of specific version
-
-[limits]
-time_s = 5
-memory_kb = 131072 # 128MB
-processes = 5
+limits = { time_s = 10, memory_kb = 1048576, processes = 150 }
