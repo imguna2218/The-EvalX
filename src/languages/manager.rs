@@ -95,39 +95,24 @@ impl LanguageRegistry {
     /// ADDED: Validates that all executable paths and mount paths exist on the host filesystem.
     /// Panics if any path is not found, preventing runtime errors.
     fn validate_paths(config_path: &Path, config: &TomlConfig) -> Result<()> {
-    // TEMPORARILY DISABLE PATH VALIDATION
-    /*
-    let check = |p: &String| {
-        if p.starts_with('/') && !p.contains("/opt/evalx/chroots/") && p != "/usr/bin/echo" {
-            if !Path::new(p).exists() {
+        // Validate that chroot_path exists
+        if let Some(chroot) = &config.chroot_path {
+            if !Path::new(chroot).exists() {
                 panic!(
-                    "FATAL CONFIG ERROR in \"{}\": Path '{}' does not exist on the host machine. The application cannot start.",
-                    config_path.display(), p
+                    "FATAL CONFIG ERROR in \"{}\": chroot_path '{}' does not exist. Code execution will fail without a valid chroot environment.",
+                    config_path.display(), chroot
                 );
             }
+            info!("Validated chroot_path: {}", chroot);
+        } else {
+            warn!(
+                "WARNING in \"{}\": chroot_path is not specified. Code execution will rely on host system dependencies and may fail.",
+                config_path.display()
+            );
         }
-    };
-    
-    if let Some(exe) = config.compile.command.get(0) {
-        if exe != "echo" {
-            check(exe);
-        }
+        
+        Ok(())
     }
-    if let Some(exe) = config.run.command.get(0) {
-        check(exe);
-    }
-
-    for path in &config.mount_paths {
-        check(path);
-    }
-    
-    if let Some(chroot) = &config.chroot_path {
-        check(chroot);
-    }
-    */
-    
-    Ok(())
-}
 
     fn parse_path(path: &Path) -> Option<(String, String)> {
         let version_str = path.file_stem()?.to_str()?.strip_prefix('v')?.to_string();

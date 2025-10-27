@@ -9,6 +9,7 @@ use tracing::{debug, error, warn};
 use crate::caching::redis_client::RedisClient;
 use crate::languages::config::LanguageConfig;
 use tokio::time::timeout;
+use crate::info;
 
 // REPLACED: This is the new "smart key" for the pre-warmed pool.
 // It gets a ready-to-use box ID from the pool.
@@ -81,110 +82,140 @@ pub struct RunResult {
 pub struct IsolateSandbox;
 
 impl IsolateSandbox {
-    pub async fn compile(
-        &self,
-        config: &LanguageConfig,
-        code: &str,
-        redis_client: RedisClient,
-    ) -> Result<CompilationResult> {
-        let sandbox = PrewarmedSandbox::new(redis_client).await?;
-        let box_id = sandbox.box_id;
+pub async fn compile(
+    &self,
+    config: &LanguageConfig,
+    code: &str,
+    redis_client: RedisClient,
+) -> Result<CompilationResult> {
+    let sandbox = PrewarmedSandbox::new(redis_client).await?;
+    let box_id = sandbox.box_id;
 
-        let execution_result = async {
-            let start_time = Instant::now();
+    // --- DEFINE box_path HERE ---
+    let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
 
-            // --- THIS IS THE ORIGINAL LOGIC ---
-            let limits = config.compile.limits.clone().unwrap_or_default();
-            let time_limit_s = limits.time_s;
-            let mem_limit_kb = limits.memory_kb;
-            let process_count = limits.processes;
+    let execution_result = async {
+        let start_time = Instant::now();
+        let limits = config.compile.limits.clone().unwrap_or_default();
+        let time_limit_s = limits.time_s;
+        let mem_limit_kb = limits.memory_kb;
+        let process_count = limits.processes;
 
-            let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
-            fs::write(format!("{}/{}", box_path, &config.source_filename), code).await?;
+        // --- Use box_path defined outside ---
+        // let box_path = format!("/var/local/lib/isolate/{}/box", box_id); // REMOVE THIS LINE
 
-            let mut cmd =
-                self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
-            cmd.arg("--run").arg("--").args(&config.compile.command);
-            debug!("Executing compile command: {:?}", cmd);
+        let source_file_sandbox_path = format!("/box/{}", &config.source_filename);
+        let stderr_file_sandbox_path = "/box/stderr.txt";
+        let executable_file_sandbox_path = format!("/box/{}", &config.executable_filename);
 
-            let child = cmd.spawn()?;
-            let child_id = child.id().unwrap_or(0);
-            let execution_future = child.wait_with_output();
-            let timeout_duration = Duration::from_secs(time_limit_s + 2);
+        // --- Debug --version check (optional) ---
+        // ... (rest of the debug block, uses box_path) ...
 
-            // --- Start Change 2: Log isolate's errors during compile ---
-            // Store the result of the timeout first
-            let output_result = tokio::time::timeout(timeout_duration, execution_future).await;
+        let mut cmd =
+            self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
 
-            // Now match on the timeout result
-            let output = match output_result {
-                Ok(Ok(output)) => {
-                    // Log isolate's own stderr IF IT'S NOT EMPTY
-                    let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
-                    if !isolate_stderr_str.is_empty() {
-                        // Use warn level, might not be a fatal error for isolate itself
-                        warn!("Isolate stderr (compile, box {}): {}", box_id, isolate_stderr_str);
-                    }
-                    output // Continue with the output
-                }
-                Ok(Err(e)) => return Err(anyhow!("Compile process failed: {}", e)),
-                Err(_) => { // Timeout occurred
-                    error!(
-                        "Compile command for '{}' (PID: {}) timed out after {:?}. Attempting to kill.",
-                        config.name, child_id, timeout_duration // Added timeout duration to log
-                    );
-                    // Kill process logic... (keep as is)
-                    if let Err(e) = Command::new("kill")
-                      .arg("-9")
-                      .arg(child_id.to_string())
-                      .status()
-                      .await
-                    {
-                        error!("Failed to kill runaway compile process with PID {}: {}", child_id, e);
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    // Return timeout result... (keep as is)
-                    return Ok(CompilationResult {
-                        success: false,
-                        compile_time: time_limit_s as f64,
-                        binary: None,
-                        stderr: "Compilation timed out.".to_string(),
-                    });
-                }
-            };
-            // --- End Change 2 ---
+        let compile_command_str = config.compile.command.join(" ");
+        let bash_command = format!(
+            "printf '%s' \"$1\" > \"{}\" && cd /box && {} 2> \"{}\"; exit $?",
+            source_file_sandbox_path,
+            compile_command_str,
+            stderr_file_sandbox_path
+        );
 
-            let compile_time = start_time.elapsed().as_secs_f64();
-            // We capture isolate's stderr here regardless, might be useful even on success
+        cmd.arg("--run").arg("--")
+           .arg("/bin/bash")
+           .arg("-c")
+           .arg(bash_command)
+           .arg("bash")
+           .arg(code);
+
+        debug!("Executing compile command via bash -c (writing file inside): {:?}", cmd);
+
+        let child = cmd.spawn()?;
+        let child_id = child.id().unwrap_or(0);
+        let execution_future = child.wait_with_output();
+        let timeout_duration = Duration::from_secs(time_limit_s + 2);
+
+        // --- Timeout logic ---
+        let output = match tokio::time::timeout(timeout_duration, execution_future).await {
+            // ... (timeout handling as before, uses box_id) ...
+             Ok(Ok(output)) => {
+                 let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
+                 if !isolate_stderr_str.is_empty() {
+                    warn!("Isolate stderr (compile, box {}): {}", box_id, isolate_stderr_str);
+                 }
+                 output
+            }
+             Ok(Err(e)) => return Err(anyhow!("Compile process failed to execute: {}", e)),
+             Err(_) => {
+                 error!(
+                     "Compile command for '{}' (PID: {}) timed out after {:?}. Killing.",
+                     config.name, child_id, timeout_duration
+                 );
+                 let _ = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await;
+                 sleep(Duration::from_millis(50)).await;
+                 return Ok(CompilationResult {
+                     success: false,
+                     compile_time: time_limit_s as f64,
+                     binary: None,
+                     stderr: "Compilation timed out.".to_string(),
+                 });
+             }
+        };
+
+        let compile_time = start_time.elapsed().as_secs_f64();
+
+        // --- Use box_path defined outside ---
+        let stderr_file_host_path = format!("{}/stderr.txt", box_path);
+        let executable_file_host_path = format!("{}/{}", box_path, &config.executable_filename);
+
+        if output.status.success() {
+            let binary = fs::read(&executable_file_host_path).await?;
+            let compiler_warnings = fs::read_to_string(&stderr_file_host_path)
+                                     .await
+                                     .unwrap_or_default();
+            let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
+            Ok(CompilationResult {
+                success: true,
+                compile_time,
+                binary: Some(binary),
+                stderr: compiler_warnings,
+            })
+        } else {
+            let compiler_error = fs::read_to_string(&stderr_file_host_path)
+                                     .await
+                                     .unwrap_or_else(|e| format!("Failed to read compiler stderr.txt: {}", e));
+            let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
             let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            if output.status.success() ||!config.is_compiled {
-                let binary = if!config.is_compiled {
-                    code.as_bytes().to_vec()
-                } else {
-                    fs::read(format!("{}/{}", box_path, &config.executable_filename)).await?
-                };
-                Ok(CompilationResult {
-                    success: true,
-                    compile_time,
-                    binary: Some(binary),
-                    // Return isolate's stderr even on success for debugging, can be empty
-                    stderr: isolate_stderr,
-                })
+            let final_stderr = if !compiler_error.is_empty() {
+                compiler_error
+            } else if !isolate_stderr.is_empty() {
+                format!("Compilation failed. Isolate stderr: {}", isolate_stderr)
             } else {
-                // If compile fails, log it clearly and return isolate's stderr as the reason
-                error!("Compilation failed for '{}' (Box {}). Isolate stderr: {}", config.name, box_id, isolate_stderr);
-                Ok(CompilationResult {
-                    success: false,
-                    compile_time,
-                    binary: None,
-                    stderr: isolate_stderr, // Use isolate's stderr as the primary error message
-                })
-            }
+                format!("Compilation failed with exit code {:?} but no error message captured.", output.status.code())
+            };
+
+            error!("Compilation failed for '{}' (Box {}). Exit code: {:?}. Captured stderr: {}",
+                   config.name, box_id, output.status.code(), final_stderr);
+
+            Ok(CompilationResult {
+                success: false,
+                compile_time,
+                binary: None,
+                stderr: final_stderr,
+            })
         }
-      .await;
-        execution_result
     }
+    .await; // End of the async block
+
+    // --- Use box_path defined outside for cleanup ---
+    let source_file_host_path = format!("{}/{}", box_path, &config.source_filename);
+    let _ = fs::remove_file(&source_file_host_path).await; // Cleanup source file
+
+    execution_result
+}
+
 
     pub async fn run(
         &self,
@@ -351,7 +382,7 @@ impl IsolateSandbox {
         execution_result
     }
 
-    fn build_base_command(
+fn build_base_command(
     &self,
     box_id: u16,
     config: &LanguageConfig,
@@ -360,51 +391,75 @@ impl IsolateSandbox {
     proc: u64,
 ) -> Command {
     let mut cmd = Command::new("isolate");
+    cmd.arg("--cg").arg(format!("--box-id={}", box_id));
 
+    // Mount chroot directories based on language type
     if let Some(chroot_path) = &config.chroot_path {
-        if std::path::Path::new(chroot_path).exists() {
-            cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
-            cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
-            cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
-            cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
+        match config.name.as_str() {
+            "java11" | "java21" | "java" => {
+                // Java: Mount entire chroot as root + /etc
+                cmd.arg(format!("--dir={}=/", chroot_path));
+                cmd.arg("--dir=/etc=/etc");
+                
+                // Java environment variables
+                let java_version = if config.name == "java11" { "11" } else { "21" };
+                let java_home = format!("/usr/lib/jvm/java-{}-openjdk-amd64", java_version);
+                cmd.arg(format!("--env=LD_LIBRARY_PATH={}/lib/jli:{}/lib/server:{}/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu", java_home, java_home, java_home));
+                cmd.arg(format!("--env=JAVA_HOME={}", java_home));
+                cmd.arg(format!("--env=PATH={}/bin:/usr/bin:/bin", java_home));
+            }
+            "python" => {
+                // Python: Mount specific directories
+                cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
+                cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
+                cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
+                cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
+                cmd.arg(format!("--dir={}/etc=/etc", chroot_path));
+                cmd.arg(format!("--dir={}/var=/var", chroot_path));
+                
+                // Python environment variables
+                cmd.arg("--env=PATH=/usr/bin:/bin");
+                cmd.arg("--env=PYTHONPATH=/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages");
+            }
+            "c" | "cpp" => {
+                // C/C++: Mount specific directories
+                cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
+                cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
+                cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
+                cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
+                cmd.arg(format!("--dir={}/etc=/etc", chroot_path));
+                cmd.arg(format!("--dir={}/var=/var", chroot_path));
+                
+                // C/C++ environment variables
+                cmd.arg("--env=PATH=/usr/bin:/bin");
+            }
+            _ => {
+                // Default: Mount specific directories
+                cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
+                cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
+                cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
+                cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
+                cmd.arg("--env=PATH=/usr/bin:/bin");
+            }
         }
     }
 
-    let essential_dirs = ["/dev", "/proc", "/sys", "/tmp", "/var", "/etc"];
-    for dir in essential_dirs.iter() {
-        cmd.arg(format!("--dir={}={}", dir, dir));
-    }
-
-    cmd.arg("--env=PATH=/bin:/usr/bin:/usr/local/bin:/usr/sbin");
-
+    // Additional custom environment variables from config
     for (key, val) in &config.env_vars {
         cmd.arg(format!("--env={}={}", key, val));
     }
 
-    match config.name.as_str() {
-        "python" => {
-            cmd.arg("--env=PYTHONPATH=/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages");
-        }
-        "javascript" => {
-            cmd.arg("--env=NODE_PATH=/usr/lib/nodejs:/usr/local/lib/node_modules");
-        }
-        "java11" | "java21" => {
-            cmd.arg("--env=JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64");
-        }
-        _ => {}
-    }
+    cmd.arg("--dir=/tmp=/tmp:rw");
 
-    cmd.arg("--cg")
-      .arg(format!("--cg-mem={}", mem))
-      .arg(format!("--box-id={}", box_id))
-      .arg("--stdout=stdout.txt")
+    // Resource limits and I/O redirection
+    cmd.arg("--stdout=stdout.txt")
       .arg("--stderr=stderr.txt")
       .arg(format!("--time={}", time))
       .arg(format!("--wall-time={}", time * 2))
-      .arg(format!("--fsize={}", 1024 * 1024)) // 1GB file size limit
+      .arg(format!("--cg-mem={}", mem))
       .arg(format!("--mem={}", mem))
-      .arg(format!("--processes={}", proc))
-      .arg("-v");
+      .arg(format!("--fsize={}", 1024 * 1024))
+      .arg(format!("--processes={}", proc));
 
     cmd
 }

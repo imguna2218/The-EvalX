@@ -1,6 +1,7 @@
 is_compiled = false
 source_filename = "main.py"
 executable_filename = "main.py"
+chroot_path = "/opt/evalx/chroots/python/3.9"
 
 [compile]
 command = ["echo", "no-compile"]

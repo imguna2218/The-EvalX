@@ -1,7 +1,7 @@
 is_compiled = true
 source_filename = "Main.java"
 executable_filename = "Main.class"
-chroot_path = "/opt/evalx/chroots/java11"
+chroot_path = "/opt/evalx/chroots/java/v11"
 
 [compile]
 command = [
