@@ -10,30 +10,28 @@ use crate::caching::redis_client::RedisClient;
 use crate::languages::config::LanguageConfig;
 use tokio::time::timeout;
 use crate::info;
+use crate::sandbox::local_pool::LocalSandboxPool;
+use std::sync::Arc;
 
-// REPLACED: This is the new "smart key" for the pre-warmed pool.
-// It gets a ready-to-use box ID from the pool.
-// When it's destroyed (function ends or panics), the `drop` code runs automatically
-// and sends the used box ID to the cleanup queue.
 pub struct PrewarmedSandbox {
     pub box_id: u16,
-    redis_client: RedisClient,
+    pool: Arc<LocalSandboxPool>,
 }
 
 impl PrewarmedSandbox {
     // This function gets a ready box from the pool. It will wait up to 10 seconds.
-    pub async fn new(redis_client: RedisClient) -> Result<Self> {
-        const READY_POOL_KEY: &str = "evalx:sandboxes:ready";
-        let mut conn = redis_client.get_multiplexed_async_connection().await?;
-
-        let result: Option<(String, u16)> = conn.blpop(READY_POOL_KEY, 5).await?;
-
-        match result {
-            Some((_key, box_id)) => {
-                debug!("Acquired pre-warmed sandbox ID {}", box_id);
-                Ok(Self { box_id, redis_client })
-            }
-            None => Err(anyhow!("Timed out waiting for an available sandbox ID")),
+    pub async fn new(pool: Arc<LocalSandboxPool>) -> Result<Self> {
+        // Acquire from the local pool, potentially waiting
+        match pool.acquire().await {
+             Ok(box_id) => {
+                 debug!("Acquired local sandbox ID {}", box_id);
+                 Ok(Self { box_id, pool })
+             },
+             Err(e) => {
+                 error!("Failed to acquire a sandbox box ID from the local pool: {}", e);
+                 // Convert error type if necessary, or return directly if acquire returns anyhow::Error
+                 Err(anyhow!("Failed to acquire a sandbox box ID from local pool: {}", e))
+             }
         }
     }
 }
@@ -42,25 +40,16 @@ impl PrewarmedSandbox {
 // when the PrewarmedSandbox is destroyed, no matter what.
 impl Drop for PrewarmedSandbox {
     fn drop(&mut self) {
-        const CLEANUP_POOL_KEY: &str = "evalx:sandboxes:cleanup";
-        debug!("Sandbox {} is finished. Sending to cleanup queue.", self.box_id);
-        let client = self.redis_client.clone();
+        debug!("Local Sandbox {} is finished. Releasing to cleanup.", self.box_id);
+        let pool_clone = self.pool.clone();
         let id = self.box_id;
+        // Spawn a task to release the ID back to the pool asynchronously
+        // This avoids blocking the drop handler if the channel is full (though it shouldn't be)
         tokio::spawn(async move {
-            let mut conn = match client.get_multiplexed_async_connection().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("CRITICAL LEAK: Could not get Redis connection to send box #{} for cleanup: {}", id, e);
-                    return;
-                }
-            };
-            if let Err(e) = conn.rpush::<_, _, ()>(CLEANUP_POOL_KEY, id).await {
-                error!("CRITICAL LEAK: Failed to send sandbox ID {} to cleanup queue: {}", id, e);
-            }
+            pool_clone.release(id).await;
         });
     }
 }
-
 pub struct CompilationResult {
     pub success: bool,
     pub compile_time: f64,
@@ -85,9 +74,9 @@ pub async fn compile(
     &self,
     config: &LanguageConfig,
     code: &str,
-    redis_client: RedisClient,
+    pool: Arc<LocalSandboxPool>,
 ) -> Result<CompilationResult> {
-    let sandbox = PrewarmedSandbox::new(redis_client).await?;
+    let sandbox = PrewarmedSandbox::new(pool).await?;
     let box_id = sandbox.box_id;
 
     // --- DEFINE box_path HERE ---
@@ -222,9 +211,9 @@ pub async fn compile(
         code_or_binary: &[u8],
         stdin: &str,
         time_limit_s: u64,
-        redis_client: RedisClient,
+        pool: Arc<LocalSandboxPool>,
     ) -> Result<RunResult> {
-        let sandbox = PrewarmedSandbox::new(redis_client).await?;
+        let sandbox = PrewarmedSandbox::new(pool).await?;
         let box_id = sandbox.box_id;
 
         let execution_result = async {

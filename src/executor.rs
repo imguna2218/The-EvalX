@@ -18,48 +18,9 @@ use crate::models::response::EvaluationResult;
 use crate::sandbox::isolate::IsolateSandbox;
 use crate::types::index::{CodeExecutor, ConcurrencyState};
 use std::env;
+use crate::sandbox::local_pool::LocalSandboxPool;
 
 impl CodeExecutor {
-    
-    async fn warmup_java_environment(&self) -> Result<()> {
-        info!("Attempting to warm up Java environment...");
-        let lang_key = "java:21";
-        let java_config = match self.language_registry.get(lang_key) {
-            Some(config) => config,
-            None => {
-                warn!(
-                    "Could not find configuration for '{}'. Skipping Java warm-up.",
-                    lang_key
-                );
-                return Ok(());
-            }
-        };
-
-        let warmup_code = r#"
-        public class Warmup {
-            public static void main(String[] args) {
-                System.out.println("Warmup completed");
-            }
-        }
-        "#
-        .to_string();
-
-        let sandbox = IsolateSandbox;
-        match sandbox
-            .compile(
-                &java_config,
-                &warmup_code,
-                self.redis_client.clone(),
-            )
-            .await
-        {
-            Ok(_) => info!("Java environment warm-up completed successfully."),
-            Err(e) => warn!("Java warm-up failed: {}, but continuing...", e),
-        }
-
-        Ok(())
-    }
-
     async fn calculate_optimal_concurrency(
         &self,
         language: &str,
@@ -157,7 +118,7 @@ impl CodeExecutor {
     pub async fn execute_batch(
         self: Arc<Self>,
         requests: Vec<ExecutionRequest>,
-        redis_client: RedisClient,
+        pool: Arc<LocalSandboxPool>,
         token: Option<String>,
     ) -> Result<Vec<EvaluationResult>> {
         if requests.is_empty() {
@@ -176,11 +137,6 @@ impl CodeExecutor {
             .get(&lang_key)
             .ok_or_else(|| anyhow!("Unsupported language or version: {}", lang_key))?;
     
-        if let Err(e) = redis_client.diagnose_pool_health().await {
-            error!("Pool health check failed before batch execution: {}", e);
-            // We don't fail fast here, but log the warning and proceed
-            // This allows the system to attempt recovery through retries
-        }
 
 
         info!(
@@ -197,7 +153,7 @@ impl CodeExecutor {
             let code_hash = Sha256::digest(base_code.as_bytes()).encode_hex::<String>();
             let artifact_key = format!("evalx:artifact:isolate:{}:{}", &base_language, &code_hash);
 
-            if let Some(cached_artifact) = redis_client
+            if let Some(cached_artifact) = self.redis_client
                 .get_artifact_async(&artifact_key, &base_language)
                 .await?
             {
@@ -206,7 +162,7 @@ impl CodeExecutor {
             } else {
                 debug!("Compiling code with Isolate for language: {}", base_language);
                 let compile_result = sandbox
-                    .compile(&lang_config, &base_code, redis_client.clone())
+                    .compile(&lang_config, &base_code, pool.clone())
                     .await?;
                 compile_time = compile_result.compile_time;
 
@@ -222,7 +178,7 @@ impl CodeExecutor {
                     return Ok(vec![error_result; requests.len()]);
                 }
                 artifact = compile_result.binary.unwrap();
-                redis_client
+                self.redis_client
                     .set_artifact_async(&artifact_key, &base_language, &base_code, &artifact)
                     .await?;
             }
@@ -247,11 +203,9 @@ impl CodeExecutor {
             
             let config_clone = Arc::clone(&lang_config);
             let artifact_clone = Arc::clone(&shared_artifact);
-            let redis_client_clone = redis_client.clone();
+            let pool_clone = pool.clone();
 
             let task = tokio::spawn(async move {
-                // The permit is moved into the task and dropped when the task completes,
-                // automatically releasing it back to the semaphore.
                 let _permit = permit;
 
                 let sandbox = IsolateSandbox;
@@ -263,7 +217,7 @@ impl CodeExecutor {
                         &artifact_clone,
                         &request.stdin,
                         time_limit,
-                        redis_client_clone,
+                        pool_clone,
                     )
                     .await?;
                 
@@ -317,7 +271,7 @@ impl CodeExecutor {
 
         if let Some(token) = token {
             let result_key = format!("result:{}", token);
-            if let Err(e) = redis_client
+            if let Err(e) = self.redis_client
                 .set_in_cache_async(&result_key, &results, 3600)
                 .await
             {
