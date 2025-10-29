@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::caching::redis_client::RedisClient;
 use crate::models::request::ExecutionRequest;
 use crate::models::response::EvaluationResult;
-use crate::sandbox::isolate::IsolateSandbox;
+use crate::sandbox::isolate::{IsolateSandbox, PrewarmedSandbox};
 use crate::types::index::{CodeExecutor, ConcurrencyState};
 use std::env;
 use crate::sandbox::local_pool::LocalSandboxPool;
@@ -187,86 +187,45 @@ impl CodeExecutor {
         }
 
         let shared_artifact = Arc::new(artifact);
-        
         let default_timeout: u64 = env::var("DEFAULT_TIMEOUT")
             .unwrap_or_else(|_| "10".to_string())
             .parse()
             .unwrap_or(10);
-
-        // --- REFACTORED: Thundering Herd Fix ---
-        let mut tasks: Vec<JoinHandle<Result<EvaluationResult>>> = Vec::new();
+        
+        let sandbox_instance = PrewarmedSandbox::new(pool.clone()).await?;
+        let box_id = sandbox_instance.box_id;
+        let mut results: Vec<EvaluationResult> = Vec::new();
+        let compile_time_for_batch = compile_time;
 
         for request in requests {
-            // Acquire a permit from the main semaphore BEFORE spawning the task.
-            // This ensures we don't start more concurrent tasks than the system can handle.
-            let permit = self.semaphore.clone().acquire_owned().await?;
-            
             let config_clone = Arc::clone(&lang_config);
             let artifact_clone = Arc::clone(&shared_artifact);
-            let pool_clone = pool.clone();
+            let sandbox_run = IsolateSandbox;
+            let time_limit = request.timeout.unwrap_or(default_timeout);
 
-            let task = tokio::spawn(async move {
-                let _permit = permit;
-
-                let sandbox = IsolateSandbox;
-                let time_limit = request.timeout.unwrap_or(default_timeout);
-
-                let run_result = sandbox
-                    .run(
-                        &config_clone,
-                        &artifact_clone,
-                        &request.stdin,
-                        time_limit,
-                        pool_clone,
-                    )
-                    .await?;
-                
-                Ok(EvaluationResult {
-                    compile_time: 0.0, // Compile time is added later
-                    stdout: run_result.stdout,
-                    stderr: if run_result.stderr.is_empty() {
-                        None
-                    } else {
-                        Some(run_result.stderr)
-                    },
-                    exit_code: run_result.exit_code,
-                    run_time: run_result.run_time,
-                    space_consumed: format!("{} KB", run_result.memory_used_kb),
-                })
-            });
-            tasks.push(task);
-        }
-
-        let task_outputs = future::join_all(tasks).await;
-
-        let results: Vec<EvaluationResult> = task_outputs.into_iter().map(|res| {
-            match res {
-                Ok(Ok(mut result)) => { // Successfully executed
-                    result.compile_time = compile_time;
-                    result
-                },
-                Ok(Err(e)) => { // Execution failed with an application error
-                    error!("Isolate task execution failed: {}", e);
-                     let error_msg = e.to_string();
-                    if error_msg.contains("currently in use by another process") || error_msg.contains("Failed to acquire a sandbox box ID") {
-                        EvaluationResult::error_result(
-                            "System busy: Execution resource temporarily unavailable".to_string(),
-                        )
-                    } else if error_msg.contains("No such file or directory") {
-                        EvaluationResult::error_result(
-                            "System error: Execution environment not available".to_string(),
-                        )
-                    } else {
-                        EvaluationResult::error_result(format!("Execution failed: {}", error_msg))
-                    }
-                },
-                Err(e) => { // Task panicked or was cancelled
-                    error!("Tokio task failed to execute: {}", e);
-                    EvaluationResult::error_result(format!("System error: Task failed to run: {}", e))
+            match sandbox_run.run_in_existing_box(
+                box_id,
+                &config_clone,
+                &artifact_clone,
+                &request.stdin,
+                time_limit,
+            ).await {
+                Ok(run_result) => {
+                    results.push(EvaluationResult {
+                        compile_time: compile_time_for_batch,
+                        stdout: run_result.stdout,
+                        stderr: if run_result.stderr.is_empty() { None } else { Some(run_result.stderr) },
+                        exit_code: run_result.exit_code,
+                        run_time: run_result.run_time,
+                        space_consumed: format!("{} KB", run_result.memory_used_kb),
+                    });
+                }
+                Err(e) => {
+                    error!("Test case failed within batch {}: {}", token.as_deref().unwrap_or("unknown"), e);
+                    results.push(EvaluationResult::error_result(format!("Execution failed: {}", e)));
                 }
             }
-        }).collect();
-        // --- END REFACTOR ---
+        }
 
 
         if let Some(token) = token {

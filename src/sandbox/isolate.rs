@@ -70,139 +70,269 @@ pub struct RunResult {
 pub struct IsolateSandbox;
 
 impl IsolateSandbox {
-pub async fn compile(
-    &self,
-    config: &LanguageConfig,
-    code: &str,
-    pool: Arc<LocalSandboxPool>,
-) -> Result<CompilationResult> {
-    let sandbox = PrewarmedSandbox::new(pool).await?;
-    let box_id = sandbox.box_id;
 
-    // --- DEFINE box_path HERE ---
-    let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
+    pub async fn run_in_existing_box(
+        &self,
+        box_id: u16,
+        config: &LanguageConfig,
+        code_or_binary: &[u8],
+        stdin: &str,
+        time_limit_s: u64,
+    ) -> Result<RunResult> {
+        let execution_result = async {
+            let limits = config.run.limits.clone().unwrap_or_default();
+            let mem_limit_kb = limits.memory_kb;
+            let process_count = limits.processes;
 
-    let execution_result = async {
-        let start_time = Instant::now();
-        let limits = config.compile.limits.clone().unwrap_or_default();
-        let time_limit_s = limits.time_s;
-        let mem_limit_kb = limits.memory_kb;
-        let process_count = limits.processes;
-
-        // --- Use box_path defined outside ---
-        // let box_path = format!("/var/local/lib/isolate/{}/box", box_id); // REMOVE THIS LINE
-
-        let source_file_sandbox_path = format!("/box/{}", &config.source_filename);
-        let stderr_file_sandbox_path = "/box/stderr.txt";
-        let executable_file_sandbox_path = format!("/box/{}", &config.executable_filename);
-
-        // --- Debug --version check (optional) ---
-        // ... (rest of the debug block, uses box_path) ...
-
-        let mut cmd =
-            self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
-
-        let compile_command_str = config.compile.command.join(" ");
-        let bash_command = format!(
-            "printf '%s' \"$1\" > \"{}\" && cd /box && {} 2> \"{}\"; exit $?",
-            source_file_sandbox_path,
-            compile_command_str,
-            stderr_file_sandbox_path
-        );
-
-        cmd.arg("--run").arg("--")
-           .arg("/bin/bash")
-           .arg("-c")
-           .arg(bash_command)
-           .arg("bash")
-           .arg(code);
-
-        debug!("Executing compile command via bash -c (writing file inside): {:?}", cmd);
-
-        let child = cmd.spawn()?;
-        let child_id = child.id().unwrap_or(0);
-        let execution_future = child.wait_with_output();
-        let timeout_duration = Duration::from_secs(time_limit_s + 2);
-
-        // --- Timeout logic ---
-        let output = match tokio::time::timeout(timeout_duration, execution_future).await {
-            // ... (timeout handling as before, uses box_id) ...
-             Ok(Ok(output)) => {
-                 let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
-                 if !isolate_stderr_str.is_empty() {
-                    warn!("Isolate stderr (compile, box {}): {}", box_id, isolate_stderr_str);
-                 }
-                 output
+            let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
+            let file_to_write_path = format!("{}/{}", box_path, &config.executable_filename);
+            fs::write(&file_to_write_path, code_or_binary).await?;
+            if config.is_compiled {
+                let mut perms = fs::metadata(&file_to_write_path).await?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&file_to_write_path, perms).await?;
             }
-             Ok(Err(e)) => return Err(anyhow!("Compile process failed to execute: {}", e)),
-             Err(_) => {
-                 error!(
-                     "Compile command for '{}' (PID: {}) timed out after {:?}. Killing.",
-                     config.name, child_id, timeout_duration
-                 );
-                 let _ = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await;
-                 sleep(Duration::from_millis(50)).await;
-                 return Ok(CompilationResult {
-                     success: false,
-                     compile_time: time_limit_s as f64,
-                     binary: None,
-                     stderr: "Compilation timed out.".to_string(),
-                 });
-             }
-        };
+            fs::write(format!("{}/stdin.txt", box_path), stdin).await?;
+            let meta_file_path = format!("/tmp/isolate_{}.txt", box_id);
 
-        let compile_time = start_time.elapsed().as_secs_f64();
+            let mut cmd =
+                self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
+            cmd.arg("--stdin=stdin.txt")
+              .arg(format!("--meta={}", meta_file_path))
+              .arg("--run")
+              .arg("--")
+              .args(&config.run.command);
+            debug!("Executing run command: {:?}", cmd);
 
-        // --- Use box_path defined outside ---
-        let stderr_file_host_path = format!("{}/stderr.txt", box_path);
-        let executable_file_host_path = format!("{}/{}", box_path, &config.executable_filename);
-
-        if output.status.success() {
-            let binary = fs::read(&executable_file_host_path).await?;
-            let compiler_warnings = fs::read_to_string(&stderr_file_host_path)
-                                     .await
-                                     .unwrap_or_default();
-            let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
-            Ok(CompilationResult {
-                success: true,
-                compile_time,
-                binary: Some(binary),
-                stderr: compiler_warnings,
-            })
-        } else {
-            let compiler_error = fs::read_to_string(&stderr_file_host_path)
-                                     .await
-                                     .unwrap_or_else(|e| format!("Failed to read compiler stderr.txt: {}", e));
-            let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
-            let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-            let final_stderr = if !compiler_error.is_empty() {
-                compiler_error
-            } else if !isolate_stderr.is_empty() {
-                format!("Compilation failed. Isolate stderr: {}", isolate_stderr)
-            } else {
-                format!("Compilation failed with exit code {:?} but no error message captured.", output.status.code())
+            let child = cmd.spawn()?;
+            let child_id = child.id().unwrap_or(0);
+            let execution_future = child.wait_with_output();
+            let timeout_duration = Duration::from_secs(time_limit_s + 2);
+            let output_result = tokio::time::timeout(timeout_duration, execution_future).await;
+            let output = match output_result {
+                 Ok(Ok(output)) => {
+                    let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
+                    if !isolate_stderr_str.is_empty() {
+                        warn!("Isolate stderr (run, box {}): {}", box_id, isolate_stderr_str);
+                    }
+                    output
+                 }
+                 Ok(Err(e)) => return Err(anyhow!("Run process failed: {}", e)),
+                 Err(_) => {
+                     error!(
+                        "Run command for '{}' (PID: {}) timed out after {:?}. Attempting to kill.",
+                        config.name, child_id, timeout_duration
+                    );
+                     if let Err(e) = Command::new("kill")
+                       .arg("-9")
+                       .arg(child_id.to_string())
+                       .status()
+                       .await
+                     {
+                         error!("Failed to kill runaway run process with PID {}: {}", child_id, e);
+                     }
+                     tokio::time::sleep(Duration::from_millis(50)).await;
+                     return Ok(RunResult {
+                         stdout: String::new(),
+                         stderr: "Time Limit Exceeded".to_string(),
+                         exit_code: -1,
+                         run_time: time_limit_s as f64,
+                         wall_time: (time_limit_s * 2) as f64,
+                         memory_used_kb: 0,
+                         status: "TO".to_string(),
+                     });
+                 }
             };
-
-            error!("Compilation failed for '{}' (Box {}). Exit code: {:?}. Captured stderr: {}",
-                   config.name, box_id, output.status.code(), final_stderr);
-
-            Ok(CompilationResult {
-                success: false,
-                compile_time,
-                binary: None,
+            let program_stdout = fs::read_to_string(format!("{}/stdout.txt", box_path)).await.unwrap_or_default();
+            let program_stderr = fs::read_to_string(format!("{}/stderr.txt", box_path)).await.unwrap_or_else(|_| "".to_string());
+            let meta_content = fs::read_to_string(&meta_file_path).await.unwrap_or_else(|_| "status:XX".to_string());
+            let _ = fs::remove_file(&meta_file_path).await;
+            let mut run_time = 0.0;
+            let mut wall_time = 0.0;
+            let mut memory_used_kb = 0;
+            let mut status = "Unknown".to_string();
+            for line in meta_content.lines() {
+                if let Some((key, value)) = line.split_once(':') {
+                    match key {
+                        "time" => run_time = value.parse().unwrap_or(0.0),
+                        "wall-time" => wall_time = value.parse().unwrap_or(0.0),
+                        "max-rss" => memory_used_kb = value.parse().unwrap_or(0),
+                        "status" => status = value.to_string(),
+                        _ => {}
+                     }
+                }
+            }
+            if status == "TO" {
+                run_time = time_limit_s as f64;
+            }
+            let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let final_stderr = match status.as_str() {
+                "TO" => "Time Limit Exceeded".to_string(),
+                "SG" | "RE" | "XX" => {
+                    if !program_stderr.is_empty() {
+                        program_stderr
+                    } else if !isolate_stderr.is_empty() {
+                        format!("Runtime Error (isolate: {})", isolate_stderr)
+                    } else {
+                        format!("Runtime Error (status: {})", status)
+                    }
+                }
+                _ => {
+                    if !program_stderr.is_empty() {
+                        program_stderr
+                    } else {
+                        "".to_string()
+                    }
+                }
+            };
+            Ok(RunResult {
+                stdout: program_stdout,
                 stderr: final_stderr,
+                exit_code: output.status.code().unwrap_or(-1) as i64,
+                 run_time,
+                wall_time,
+                memory_used_kb,
+                status,
             })
         }
+      .await;
+        execution_result
     }
-    .await; // End of the async block
 
-    // --- Use box_path defined outside for cleanup ---
-    let source_file_host_path = format!("{}/{}", box_path, &config.source_filename);
-    let _ = fs::remove_file(&source_file_host_path).await; // Cleanup source file
 
-    execution_result
-}
+    pub async fn compile(
+        &self,
+        config: &LanguageConfig,
+        code: &str,
+        pool: Arc<LocalSandboxPool>,
+    ) -> Result<CompilationResult> {
+        let sandbox = PrewarmedSandbox::new(pool).await?;
+        let box_id = sandbox.box_id;
+
+        // --- DEFINE box_path HERE ---
+        let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
+
+        let execution_result = async {
+            let start_time = Instant::now();
+            let limits = config.compile.limits.clone().unwrap_or_default();
+            let time_limit_s = limits.time_s;
+            let mem_limit_kb = limits.memory_kb;
+            let process_count = limits.processes;
+
+            // --- Use box_path defined outside ---
+            // let box_path = format!("/var/local/lib/isolate/{}/box", box_id); // REMOVE THIS LINE
+
+            let source_file_sandbox_path = format!("/box/{}", &config.source_filename);
+            let stderr_file_sandbox_path = "/box/stderr.txt";
+            let executable_file_sandbox_path = format!("/box/{}", &config.executable_filename);
+
+            // --- Debug --version check (optional) ---
+            // ... (rest of the debug block, uses box_path) ...
+
+            let mut cmd =
+                self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
+
+            let compile_command_str = config.compile.command.join(" ");
+            let bash_command = format!(
+                "printf '%s' \"$1\" > \"{}\" && cd /box && {} 2> \"{}\"; exit $?",
+                source_file_sandbox_path,
+                compile_command_str,
+                stderr_file_sandbox_path
+            );
+
+            cmd.arg("--run").arg("--")
+            .arg("/bin/bash")
+            .arg("-c")
+            .arg(bash_command)
+            .arg("bash")
+            .arg(code);
+
+            debug!("Executing compile command via bash -c (writing file inside): {:?}", cmd);
+
+            let child = cmd.spawn()?;
+            let child_id = child.id().unwrap_or(0);
+            let execution_future = child.wait_with_output();
+            let timeout_duration = Duration::from_secs(time_limit_s + 2);
+
+            // --- Timeout logic ---
+            let output = match tokio::time::timeout(timeout_duration, execution_future).await {
+                // ... (timeout handling as before, uses box_id) ...
+                Ok(Ok(output)) => {
+                    let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
+                    if !isolate_stderr_str.is_empty() {
+                        warn!("Isolate stderr (compile, box {}): {}", box_id, isolate_stderr_str);
+                    }
+                    output
+                }
+                Ok(Err(e)) => return Err(anyhow!("Compile process failed to execute: {}", e)),
+                Err(_) => {
+                    error!(
+                        "Compile command for '{}' (PID: {}) timed out after {:?}. Killing.",
+                        config.name, child_id, timeout_duration
+                    );
+                    let _ = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await;
+                    sleep(Duration::from_millis(50)).await;
+                    return Ok(CompilationResult {
+                        success: false,
+                        compile_time: time_limit_s as f64,
+                        binary: None,
+                        stderr: "Compilation timed out.".to_string(),
+                    });
+                }
+            };
+
+            let compile_time = start_time.elapsed().as_secs_f64();
+
+            // --- Use box_path defined outside ---
+            let stderr_file_host_path = format!("{}/stderr.txt", box_path);
+            let executable_file_host_path = format!("{}/{}", box_path, &config.executable_filename);
+
+            if output.status.success() {
+                let binary = fs::read(&executable_file_host_path).await?;
+                let compiler_warnings = fs::read_to_string(&stderr_file_host_path)
+                                        .await
+                                        .unwrap_or_default();
+                let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
+                Ok(CompilationResult {
+                    success: true,
+                    compile_time,
+                    binary: Some(binary),
+                    stderr: compiler_warnings,
+                })
+            } else {
+                let compiler_error = fs::read_to_string(&stderr_file_host_path)
+                                        .await
+                                        .unwrap_or_else(|e| format!("Failed to read compiler stderr.txt: {}", e));
+                let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
+                let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                let final_stderr = if !compiler_error.is_empty() {
+                    compiler_error
+                } else if !isolate_stderr.is_empty() {
+                    format!("Compilation failed. Isolate stderr: {}", isolate_stderr)
+                } else {
+                    format!("Compilation failed with exit code {:?} but no error message captured.", output.status.code())
+                };
+
+                error!("Compilation failed for '{}' (Box {}). Exit code: {:?}. Captured stderr: {}",
+                    config.name, box_id, output.status.code(), final_stderr);
+
+                Ok(CompilationResult {
+                    success: false,
+                    compile_time,
+                    binary: None,
+                    stderr: final_stderr,
+                })
+            }
+        }
+        .await; // End of the async block
+
+        // --- Use box_path defined outside for cleanup ---
+        let source_file_host_path = format!("{}/{}", box_path, &config.source_filename);
+        let _ = fs::remove_file(&source_file_host_path).await; // Cleanup source file
+
+        execution_result
+    }
 
 
     pub async fn run(

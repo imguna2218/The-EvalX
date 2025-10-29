@@ -4,7 +4,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-const LOCAL_POOL_SIZE: u16 = 35; // Or read from env var
+const LOCAL_POOL_SIZE: u16 = 25; // Or read from env var
 
 #[derive(Clone, Debug)]
 pub struct LocalSandboxPool {
