@@ -26,15 +26,14 @@ impl PrewarmedSandbox {
         const READY_POOL_KEY: &str = "evalx:sandboxes:ready";
         let mut conn = redis_client.get_multiplexed_async_connection().await?;
 
-        // Use LPOP instead of BRPOP for immediate availability check
-        let box_id: Option<u16> = conn.lpop(READY_POOL_KEY, None).await?;
+        let result: Option<(String, u16)> = conn.blpop(READY_POOL_KEY, 5).await?;
 
-        match box_id {
-            Some(box_id) => {
+        match result {
+            Some((_key, box_id)) => {
                 debug!("Acquired pre-warmed sandbox ID {}", box_id);
                 Ok(Self { box_id, redis_client })
             }
-            None => Err(anyhow!("No sandbox IDs available in pool")),
+            None => Err(anyhow!("Timed out waiting for an available sandbox ID")),
         }
     }
 }

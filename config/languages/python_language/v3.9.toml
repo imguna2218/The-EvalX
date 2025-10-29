@@ -8,4 +8,4 @@ command = ["echo", "no-compile"]
 
 [run]
 command = ["/usr/bin/python3", "main.py"]  # Use python3 instead of specific version
-limits = { time_s = 10, memory_kb = 1048576, processes = 150 }
+limits = { time_s = 10, memory_kb = 262144, processes = 150 }

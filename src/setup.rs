@@ -46,11 +46,6 @@ pub async fn initialize_executor(
         redis_client.clone(),
         tx.clone(),
     ));
-
-    let monitor_client = redis_client.clone();
-    tokio::spawn(async move {
-        monitor_client.monitor_redis_memory().await;
-    });
     
     Ok((executor, tx, queue_manager))
 }

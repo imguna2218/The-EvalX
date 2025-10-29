@@ -27,7 +27,7 @@ mod types;
 async fn initialize_sandbox_pool(redis_client: &RedisClient) -> Result<()> {
     const READY_POOL_KEY: &str = "evalx:sandboxes:ready";
     const CLEANUP_POOL_KEY: &str = "evalx:sandboxes:cleanup";
-    const POOL_SIZE: u16 = 50;
+    const POOL_SIZE: u16 = 30;
 
     info!("Initializing sandbox ID pool with {} boxes", POOL_SIZE);
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
@@ -77,7 +77,7 @@ async fn emergency_pool_recovery(redis_client: &RedisClient) -> Result<()> {
     let _: () = conn.del(CLEANUP_POOL_KEY).await?;
     
     // Reinitialize with proper permissions
-    for i in 0..50 {
+    for i in 0..30 {
         // Clean up any existing box first
         let _ = tokio::process::Command::new("isolate")
             .arg("--cg")

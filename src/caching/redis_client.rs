@@ -23,8 +23,6 @@ static CONNECTION_COUNTER: AtomicU16 = AtomicU16::new(0);
 pub struct RedisClient {
     client: redis::Client,
     pool: Pool<RedisConnectionManager>,
-    /// ADDED: Tracks the last access time of artifact keys for LRU eviction.
-    artifact_access: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 // ADDED: Manual Debug implementation to satisfy trait bounds from other structs.
@@ -69,7 +67,6 @@ impl RedisClient {
         Ok(RedisClient {
             client, // Store the original client instance.
             pool,
-            artifact_access: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -199,10 +196,6 @@ impl RedisClient {
                 
                 let mut artifact: Artifact = serde_json::from_str(&val)?;
                 
-                // ADDED: Update the last-accessed time for this artifact.
-                let mut access_map = self.artifact_access.lock().await;
-                access_map.insert(key.to_string(), Instant::now());
-                
                 if artifact.compressed {
                     debug!("Decompressing artifact for key: {}", key);
                     artifact.binary = decompress_binary(&artifact.binary)?;
@@ -258,9 +251,6 @@ impl RedisClient {
         let serialized = serde_json::to_string(&artifact)?;
         conn.set_ex::<_, _, ()>(key, serialized, ttl_seconds).await?;
 
-        // ADDED: Record the creation time for the new artifact.
-        let mut access_map = self.artifact_access.lock().await;
-        access_map.insert(key.to_string(), Instant::now());
 
         Ok(())
     }
@@ -272,73 +262,6 @@ impl RedisClient {
         Ok((hits, misses))
     }
 
-    /// ADDED: Background task to monitor Redis memory and evict old artifacts if needed.
-    pub async fn monitor_redis_memory(&self) {
-        info!("Starting Redis memory monitor task.");
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-
-            let result: Result<()> = async {
-                let mut conn = self.get_multiplexed_async_connection().await?;
-                let info: String = redis::cmd("INFO").arg("memory").query_async(&mut conn).await?;
-
-                let mut used_memory: Option<u64> = None;
-                let mut max_memory: Option<u64> = None;
-
-                for line in info.lines() {
-                    if line.starts_with("used_memory:") {
-                        used_memory = line.split(':').nth(1).and_then(|v| v.parse().ok());
-                    }
-                    if line.starts_with("maxmemory:") {
-                        max_memory = line.split(':').nth(1).and_then(|v| v.parse().ok());
-                    }
-                }
-
-                if let (Some(used), Some(max)) = (used_memory, max_memory) {
-                    if max == 0 {
-                        return Ok(());
-                    }
-
-                    let usage_ratio = used as f64 / max as f64;
-                    if usage_ratio > 0.8 {
-                        warn!(
-                            "Redis memory usage is at {:.2}%. Triggering aggressive cache eviction.",
-                            usage_ratio * 100.0
-                        );
-
-                        let mut access_map = self.artifact_access.lock().await;
-                        if access_map.is_empty() {
-                            return Ok(());
-                        }
-
-                        let mut artifacts: Vec<_> = access_map.iter().collect();
-                        artifacts.sort_by_key(|&(_, instant)| instant);
-
-                        let eviction_count = (artifacts.len() as f64 * 0.1).ceil() as usize;
-                        let to_evict: Vec<_> = artifacts.iter().take(eviction_count).map(|(k, _)| k.to_string()).collect();
-
-                        if !to_evict.is_empty() {
-                            info!("Evicting {} oldest artifacts from cache.", to_evict.len());
-                            let mut pipe = redis::pipe();
-                            for key in &to_evict {
-                                pipe.del(key);
-                            }
-                            // FIXED: Added explicit type annotation to fix the warning.
-                            pipe.query_async::<_, ()>(&mut conn).await?;
-
-                            for key in &to_evict {
-                                access_map.remove(key);
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }.await;
-
-            if let Err(e) = result {
-                error!("Error in Redis memory monitor: {}", e);
-            }
-        }
-    }
+    
 }
 

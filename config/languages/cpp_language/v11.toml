@@ -5,8 +5,8 @@ chroot_path = "/opt/evalx/chroots/cpp/v11"
 
 [compile]
 command = ["/usr/bin/g++", "-std=c++11", "-O2", "-o", "main", "main.cpp", "-lm"]
-limits = { time_s = 10, memory_kb = 1048576, processes = 500 }
+limits = { time_s = 10, memory_kb = 262144, processes = 500 }
 
 [run]
 command = ["./main"]
-limits = { time_s = 10, memory_kb = 1048576, processes = 500 }
+limits = { time_s = 10, memory_kb = 262144, processes = 500 }
