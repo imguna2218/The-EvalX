@@ -119,8 +119,16 @@ impl LanguageRegistry {
         let lang_dir_name = path.parent()?.file_name()?.to_str()?;
         let lang_name = lang_dir_name.strip_suffix("_language")?.to_string();
         
-        let final_lang_name = if lang_name == "java" && version_str == "11" {
-            "java11".to_string()
+        let final_lang_name = if lang_name == "java" {
+            if version_str == "11" {
+                "java11".to_string()
+            } else if version_str == "21" {
+                "java21".to_string() 
+            } else if version_str == "24" {
+                "java24".to_string() 
+            } else {
+                lang_name 
+            }
         } else {
             lang_name
         };

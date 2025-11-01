@@ -514,20 +514,33 @@ fn build_base_command(
     // Mount chroot directories based on language type
     if let Some(chroot_path) = &config.chroot_path {
         match config.name.as_str() {
-            "java11" | "java21" | "java" => {
-                // Java: Mount entire chroot as root + /etc
-                cmd.arg(format!("--dir={}=/", chroot_path));
-                cmd.arg("--dir=/etc=/etc");
-                
-                // Java environment variables
-                let java_version = if config.name == "java11" { "11" } else { "21" };
-                let java_home = format!("/usr/lib/jvm/java-{}-openjdk-amd64", java_version);
-                cmd.arg(format!("--env=LD_LIBRARY_PATH={}/lib/jli:{}/lib/server:{}/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu", java_home, java_home, java_home));
+            "java11" | "java21" | "java" | "java24" => {
+                cmd.arg(format!("--dir=/usr={}/usr", chroot_path));
+                cmd.arg(format!("--dir=/lib={}/lib", chroot_path));
+                cmd.arg(format!("--dir=/lib64={}/lib64", chroot_path));
+                cmd.arg(format!("--dir=/bin={}/bin", chroot_path));
+                cmd.arg(format!("--dir=/etc={}/etc", chroot_path));
+                cmd.arg(format!("--dir=/var={}/var", chroot_path));
+                cmd.arg(format!("--dir=/dev={}/dev", chroot_path));
+                cmd.arg(format!("--dir=/proc={}/proc", chroot_path));
+                cmd.arg(format!("--dir=/sys={}/sys", chroot_path));
+
+                let (java_home, ld_path) = match config.name.as_str() {
+                    "java21" => (
+                        "/usr/lib/jvm/java-21-openjdk-amd64",
+                        "/usr/lib/jvm/java-21-openjdk-amd64/lib/jli:/usr/lib/jvm/java-21-openjdk-amd64/lib/server:/usr/lib/jvm/java-21-openjdk-amd64/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+                    ),
+                    "java24" => (
+                        "/usr/local/openjdk-24",
+                        "/usr/local/openjdk-24/lib/jli:/usr/local/openjdk-24/lib/server:/usr/local/openjdk-24/lib"
+                    ),
+                };
+
+                cmd.arg(format!("--env=LD_LIBRARY_PATH={}", ld_path));
                 cmd.arg(format!("--env=JAVA_HOME={}", java_home));
                 cmd.arg(format!("--env=PATH={}/bin:/usr/bin:/bin", java_home));
             }
             "python" => {
-                // Python: Mount specific directories
                 cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
                 cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
                 cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));

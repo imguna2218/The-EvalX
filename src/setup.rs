@@ -75,7 +75,7 @@ pub async fn start_workers(
         }
     };
 
-    let num_software_workers = num_cpus::get().max(1); // Keep using num_cpus for task concurrency
+    let num_software_workers = (num_cpus::get() * 3).max(1);
     let queue_name = "evalx_jobs".to_string(); // Unified queue name
     info!(
         "Spawning {} software worker tasks for the unified '{}' queue, using the local sandbox pool.",
