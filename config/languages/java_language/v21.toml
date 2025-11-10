@@ -3,6 +3,18 @@ source_filename = "Main.java"
 executable_filename = "Main.class"
 chroot_path = "/opt/evalx/chroots/java/v21"
 
+# These mount paths are correct and match your builder script
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "var", "dev", "proc", "sys"]
+
+# --- ALL PATHS BELOW ARE CORRECTED ---
+# They now point to the '/usr/lib/jvm/java-21-openjdk-amd64' path
+# that your new chroot builder script creates.
+
+[env_vars]
+LD_LIBRARY_PATH = "/usr/lib/jvm/java-21-openjdk-amd64/lib/jli:/usr/lib/jvm/java-21-openjdk-amd64/lib/server:/usr/lib/jvm/java-21-openjdk-amd64/lib"
+JAVA_HOME = "/usr/lib/jvm/java-21-openjdk-amd64"
+PATH = "/usr/lib/jvm/java-21-openjdk-amd64/bin:/usr/bin:/bin"
+
 [compile]
 command = [
     "/usr/lib/jvm/java-21-openjdk-amd64/bin/javac",

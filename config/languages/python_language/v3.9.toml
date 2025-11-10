@@ -2,10 +2,15 @@ is_compiled = false
 source_filename = "main.py"
 executable_filename = "main.py"
 chroot_path = "/opt/evalx/chroots/python/3.9"
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "var"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+PYTHONPATH = "/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages"
 
 [compile]
 command = ["echo", "no-compile"]
 
 [run]
-command = ["/usr/bin/python3", "main.py"]  # Use python3 instead of specific version
+command = ["/usr/bin/python3", "main.py"]  
 limits = { time_s = 10, memory_kb = 262144, processes = 150 }

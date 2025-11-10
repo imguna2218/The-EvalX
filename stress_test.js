@@ -12,7 +12,7 @@ const getStdinForLanguage = (language) => {
             return `A_random_string_${Math.random().toString(36).substring(7)}`;
         case "python":
             return `${Math.floor(Math.random() * 150) + 50}`; // Primes up to 50-199
-        case "java11":
+        case "java24":
             return "the quick brown fox jumps over the lazy dog";
         default:
             return "default_input";
@@ -58,7 +58,7 @@ const getPythonCode = (id) => ({
     language: "python",
     version: "3.9",
     code: `import sys
-# Unique ID: ${id}
+# Unique ID: ${id}  <-- CORRECTED: Was '//' which is a SyntaxError in Python
 def is_prime(n):
     if n < 2: return False
     for i in range(2, int(n**0.5) + 1):
@@ -73,23 +73,24 @@ except (ValueError, IndexError):
 });
 
 const getJavaCode = (id) => ({
-    language: "java11",
-    version: "11",
-    code: `import java.util.Scanner;
-import java.util.HashMap;
+    language: "java24",
+    version: "24",
+    code: `import java.util.HashMap;
 import java.util.Map;
+import java.util.Scanner; // ADDED: Import Scanner
 // Unique ID: ${id}
-public class Main {
-    public static void main(String[] args) {
-        Scanner scanner = new Scanner(System.in);
-        String text = scanner.nextLine();
-        String[] words = text.toLowerCase().split("\\s+");
-        Map<String, Integer> wordCount = new HashMap<>();
-        for (String word : words) {
-            wordCount.put(word, wordCount.getOrDefault(word, 0) + 1);
-        }
-        wordCount.forEach((key, value) -> System.out.println(key + ": " + value));
+void main() {
+    // CORRECTED: System.console() is null in a non-interactive sandbox.
+    // Use Scanner(System.in) to read the redirected stdin.
+    Scanner scanner = new Scanner(System.in);
+    String text = scanner.nextLine(); 
+    
+    String[] words = text.toLowerCase().split("\\\\s+");
+    Map<String, Integer> wordCount = new HashMap<>();
+    for (String word : words) {
+        wordCount.put(word, wordCount.getOrDefault(word, 0) + 1);
     }
+    wordCount.forEach((key, value) -> System.out.println(key + ": " + value));
 }`
 });
 
@@ -100,7 +101,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Language distribution helper for consistent mix
 function getLanguageForUser(userId) {
-    const languages = ['c', 'cpp', 'python', 'java11'];
+    const languages = ['c', 'cpp', 'python', 'java24'];
     return languages[userId % languages.length];
 }
 
@@ -110,7 +111,7 @@ function getCodeFunctionForLanguage(language) {
         case 'c': return getCCode;
         case 'cpp': return getCppCode;
         case 'python': return getPythonCode;
-        case 'java11': return getJavaCode;
+        case 'java24': return getJavaCode;
         default: return getCCode;
     }
 }
@@ -159,20 +160,28 @@ async function simulateUser(userId) {
                 const result = await statusResponse.json();
                 if (result.status === 'Completed' || result.status === 'Failed') {
                     const duration = (Date.now() - startTime) / 1000;
-                    console.log(`User ${userId}: ✅ SUCCESS in ${duration.toFixed(2)}s (${language}) (${FIXED_BATCH_SIZE} test cases)`);
-                    // Calculate test case successes and failures
+                    
+                    // Check if the result *itself* indicates failure
                     const testCaseResults = result.results || [];
-                    const testCaseSuccesses = testCaseResults.filter(r => r.exit_code === 0 && !r.stderr).length;
+                    const testCaseSuccesses = testCaseResults.filter(r => r.exit_code === 0 && (r.stderr === null || r.stderr === "")).length;
                     const testCaseFailures = testCaseResults.length - testCaseSuccesses;
+                    
+                    if (testCaseFailures > 0) {
+                         // Log as error if any test case failed
+                        console.error(`User ${userId}: ❌ FAILED in ${duration.toFixed(2)}s (${language}) (${testCaseSuccesses}/${FIXED_BATCH_SIZE} passed)`);
+                    } else {
+                        console.log(`User ${userId}: ✅ SUCCESS in ${duration.toFixed(2)}s (${language}) (${FIXED_BATCH_SIZE} test cases)`);
+                    }
+
                     return { 
-                        success: true, 
+                        success: true, // API request succeeded
                         description: requestDescription, 
                         result, 
                         userId, 
                         language: language, 
                         duration: duration.toFixed(2), 
                         numTestCases: FIXED_BATCH_SIZE,
-                        testCaseSuccesses,
+                        testCaseSuccesses, // Report actual test case results
                         testCaseFailures
                     };
                 }
@@ -182,9 +191,9 @@ async function simulateUser(userId) {
         throw new Error('Polling timed out.');
     } catch (error) {
         const duration = (Date.now() - startTime) / 1000;
-        console.error(`User ${userId}: ❌ FAILED in ${duration.toFixed(2)}s (${language}) (${FIXED_BATCH_SIZE} test cases) - ${error.message}`);
+        console.error(`User ${userId}: ❌ API ERROR in ${duration.toFixed(2)}s (${language}) - ${error.message}`);
         return { 
-            success: false, 
+            success: false, // API request failed
             description: requestDescription, 
             error: error.message, 
             userId, 
@@ -205,7 +214,7 @@ async function main() {
     console.log(`Request Type: /execute/batch only`);
     console.log(`Batch Size: 15 test cases per request`);
     console.log(`Target Total Test Cases: ${NUM_USERS * 15}`);
-    console.log(`Language Distribution: C, C++, Python, Java11 (round-robin)`);
+    console.log(`Language Distribution: C, C++, Python, Java24 (round-robin)`);
     console.log('====================================================\n');
 
     const userPromises = Array.from({ length: NUM_USERS }, (_, i) => simulateUser(i + 1));
@@ -214,8 +223,8 @@ async function main() {
     console.log('\n\n✅ All requests have completed. Final Summary:');
     console.log('====================================================');
 
-    const userSuccesses = allResults.filter(r => r.success).length;
-    const userFailures = allResults.length - userSuccesses;
+    const userSuccesses = allResults.filter(r => r.success).length; // API Success
+    const userFailures = allResults.length - userSuccesses; // API Failures
     const totalTestCases = allResults.reduce((sum, r) => sum + r.numTestCases, 0);
     const testCaseSuccesses = allResults.reduce((sum, r) => sum + r.testCaseSuccesses, 0);
     const testCaseFailures = allResults.reduce((sum, r) => sum + r.testCaseFailures, 0);
@@ -224,17 +233,17 @@ async function main() {
     console.log(`Total Number of Test Cases: ${totalTestCases}`);
     console.log(`Total Requests: ${allResults.length}`);
     console.log('---------------------');
-    console.log(`Users:`);
+    console.log(`API Requests:`);
     console.log(`✅ Successes:    ${userSuccesses}`);
     console.log(`❌ Failures:     ${userFailures}`);
     console.log('---------------------');
-    console.log(`Testcases:`);
+    console.log(`Individual Testcases:`);
     console.log(`✅ Successes:    ${testCaseSuccesses}`);
     console.log(`❌ Failures:     ${testCaseFailures}`);
     console.log('====================================================');
     
     if (userFailures > 0) {
-        console.log("\nDetails for failed requests:");
+        console.log("\nDetails for failed API requests:");
         allResults.forEach(({ success, description, error }) => {
             if (!success) {
                 console.log(`- ${description} -> ERROR: ${error}`);
@@ -248,9 +257,10 @@ async function main() {
         language,
         duration,
         numTestCases,
-        success,
+        apiSuccess: success,
         error: success ? undefined : error,
-        result: success ? result : undefined,
+        // result: success ? result : undefined, // Optionally hide full result on API failure
+        result,
         testCaseSuccesses,
         testCaseFailures
     })), null, 2));

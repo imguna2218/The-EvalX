@@ -2,6 +2,12 @@ is_compiled = true
 source_filename = "Main.java"
 executable_filename = "Main.class"
 chroot_path = "/opt/evalx/chroots/java/v24"
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "var", "dev", "proc", "sys"]
+
+[env_vars]
+LD_LIBRARY_PATH = "/usr/local/openjdk-24/lib/jli:/usr/local/openjdk-24/lib/server:/usr/local/openjdk-24/lib"
+JAVA_HOME = "/usr/local/openjdk-24"
+PATH = "/usr/local/openjdk-24/bin:/usr/bin:/bin"
 
 [compile]
 command = [

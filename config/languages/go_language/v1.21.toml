@@ -2,6 +2,10 @@ is_compiled = true
 source_filename = "main.go"
 executable_filename = "main"
 chroot_path = "/opt/evalx/runtimes/go-v1.21"
+mount_paths = ["usr", "lib", "lib64", "bin"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
 
 [compile]
 command = ["/usr/bin/go", "build", "-o", "main", "main.go"]

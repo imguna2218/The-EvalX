@@ -488,110 +488,49 @@ impl IsolateSandbox {
 
             Ok(RunResult {
                 stdout: program_stdout,
-                stderr: final_stderr, // Use the new improved final_stderr
-                exit_code: output.status.code().unwrap_or(-1) as i64, // Use isolate's exit code
+                stderr: final_stderr, 
+                exit_code: output.status.code().unwrap_or(-1) as i64,
                 run_time,
                 wall_time,
                 memory_used_kb,
-                status, // Include the raw isolate status code
+                status, 
             })
         }
       .await;
         execution_result
     }
 
-fn build_base_command(
-    &self,
-    box_id: u16,
-    config: &LanguageConfig,
-    time: u64,
-    mem: u64,
-    proc: u64,
-) -> Command {
-    let mut cmd = Command::new("isolate");
-    cmd.arg("--cg").arg(format!("--box-id={}", box_id));
+    fn build_base_command(
+        &self,
+        box_id: u16,
+        config: &LanguageConfig,
+        time: u64,
+        mem: u64,
+        proc: u64,
+    ) -> Command {
+        let mut cmd = Command::new("isolate");
+        cmd.arg("--cg").arg(format!("--box-id={}", box_id));
 
-    // Mount chroot directories based on language type
-    if let Some(chroot_path) = &config.chroot_path {
-        match config.name.as_str() {
-            "java11" | "java21" | "java" | "java24" => {
-                cmd.arg(format!("--dir=/usr={}/usr", chroot_path));
-                cmd.arg(format!("--dir=/lib={}/lib", chroot_path));
-                cmd.arg(format!("--dir=/lib64={}/lib64", chroot_path));
-                cmd.arg(format!("--dir=/bin={}/bin", chroot_path));
-                cmd.arg(format!("--dir=/etc={}/etc", chroot_path));
-                cmd.arg(format!("--dir=/var={}/var", chroot_path));
-                cmd.arg(format!("--dir=/dev={}/dev", chroot_path));
-                cmd.arg(format!("--dir=/proc={}/proc", chroot_path));
-                cmd.arg(format!("--dir=/sys={}/sys", chroot_path));
-
-                let (java_home, ld_path) = match config.name.as_str() {
-                    "java21" => (
-                        "/usr/lib/jvm/java-21-openjdk-amd64",
-                        "/usr/lib/jvm/java-21-openjdk-amd64/lib/jli:/usr/lib/jvm/java-21-openjdk-amd64/lib/server:/usr/lib/jvm/java-21-openjdk-amd64/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
-                    ),
-                    "java24" => (
-                        "/usr/local/openjdk-24",
-                        "/usr/local/openjdk-24/lib/jli:/usr/local/openjdk-24/lib/server:/usr/local/openjdk-24/lib"
-                    ),
-                };
-
-                cmd.arg(format!("--env=LD_LIBRARY_PATH={}", ld_path));
-                cmd.arg(format!("--env=JAVA_HOME={}", java_home));
-                cmd.arg(format!("--env=PATH={}/bin:/usr/bin:/bin", java_home));
-            }
-            "python" => {
-                cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
-                cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
-                cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
-                cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
-                cmd.arg(format!("--dir={}/etc=/etc", chroot_path));
-                cmd.arg(format!("--dir={}/var=/var", chroot_path));
-                
-                // Python environment variables
-                cmd.arg("--env=PATH=/usr/bin:/bin");
-                cmd.arg("--env=PYTHONPATH=/usr/lib/python3.9:/usr/local/lib/python3.9/dist-packages");
-            }
-            "c" | "cpp" => {
-                // C/C++: Mount specific directories
-                cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
-                cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
-                cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
-                cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
-                cmd.arg(format!("--dir={}/etc=/etc", chroot_path));
-                cmd.arg(format!("--dir={}/var=/var", chroot_path));
-                
-                // C/C++ environment variables
-                cmd.arg("--env=PATH=/usr/bin:/bin");
-            }
-            _ => {
-                // Default: Mount specific directories
-                cmd.arg(format!("--dir={}/usr=/usr", chroot_path));
-                cmd.arg(format!("--dir={}/lib=/lib", chroot_path));
-                cmd.arg(format!("--dir={}/lib64=/lib64", chroot_path));
-                cmd.arg(format!("--dir={}/bin=/bin", chroot_path));
-                cmd.arg("--env=PATH=/usr/bin:/bin");
+        if let Some(chroot_path) = &config.chroot_path {
+            for path in &config.mount_paths {
+                cmd.arg(format!("--dir=/{0}={1}/{0}", path, chroot_path));
             }
         }
+
+        for (key, val) in &config.env_vars {
+            cmd.arg(format!("--env={}={}", key, val));
+        }
+
+        cmd.arg("--dir=/tmp=/tmp:rw");
+
+        cmd.arg("--stdout=stdout.txt")
+        .arg("--stderr=stderr.txt")
+        .arg(format!("--time={}", time))
+        .arg(format!("--wall-time={}", time * 2))
+        .arg(format!("--cg-mem={}", mem))
+        .arg(format!("--mem={}", mem))
+        .arg(format!("--fsize={}", 1024 * 1024))
+        .arg(format!("--processes={}", proc));
+        cmd
     }
-
-    // Additional custom environment variables from config
-    for (key, val) in &config.env_vars {
-        cmd.arg(format!("--env={}={}", key, val));
-    }
-
-    cmd.arg("--dir=/tmp=/tmp:rw");
-
-    // Resource limits and I/O redirection
-    cmd.arg("--stdout=stdout.txt")
-      .arg("--stderr=stderr.txt")
-      .arg(format!("--time={}", time))
-      .arg(format!("--wall-time={}", time * 2))
-      .arg(format!("--cg-mem={}", mem))
-      .arg(format!("--mem={}", mem))
-      .arg(format!("--fsize={}", 1024 * 1024))
-      .arg(format!("--processes={}", proc));
-
-    cmd
-}
 }
