@@ -8,21 +8,6 @@ use crate::models::response::EvaluationResult;
 use crate::languages::manager::LanguageRegistry;
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionTask {
-    pub id: String,
-    pub requests: Vec<crate::models::request::ExecutionRequest>,
-    pub execution_type: ExecutionType,
-    pub user_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ExecutionType {
-    Single,
-    Parallel,
-    Batch,
-}
-
 /// ADDED: Represents the two operational states for concurrency control.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConcurrencyState {

@@ -118,7 +118,7 @@ function getCodeFunctionForLanguage(language) {
 
 async function simulateUser(userId) {
     const endpoint = '/execute/batch'; // Always use batch endpoint
-    const FIXED_BATCH_SIZE = 15; // Fixed batch size as requested
+    const FIXED_BATCH_SIZE = 20; // Fixed batch size as requested
     
     // Get language with consistent distribution
     const language = getLanguageForUser(userId);
@@ -212,8 +212,8 @@ async function main() {
     console.log('====================================================');
     console.log(`Concurrent Users: ${NUM_USERS}`);
     console.log(`Request Type: /execute/batch only`);
-    console.log(`Batch Size: 15 test cases per request`);
-    console.log(`Target Total Test Cases: ${NUM_USERS * 15}`);
+    console.log(`Batch Size: 20 test cases per request`);
+    console.log(`Target Total Test Cases: ${NUM_USERS * 20}`);
     console.log(`Language Distribution: C, C++, Python, Java24 (round-robin)`);
     console.log('====================================================\n');
 
