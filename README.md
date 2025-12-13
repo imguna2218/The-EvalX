@@ -1,4 +1,5 @@
 # EvalX
+<img width="1046" height="778" alt="image" src="https://github.com/user-attachments/assets/35170b76-223b-4d2b-ac5f-9df934c02614" />
 
 > **High-Performance Parallel Code Execution Engine**
 
