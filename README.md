@@ -187,3 +187,5 @@ If sandboxes become locked or corrupted due to a crash:
 | **Ruby** | 3.2 | `ruby` |
 | **R** | 4.3 | `r` |
 | **SQLite** | 3.43 | `sqlite` |
+
+## Note : Languages can be added simply by defining the configurations in a single file and adding it to the `config/languages`
