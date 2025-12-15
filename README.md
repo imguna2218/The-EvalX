@@ -173,10 +173,14 @@ If sandboxes become locked or corrupted due to a crash:
 | Language | Version | Identifier |
 | :--- | :--- | :--- |
 | **Java** | OpenJDK 21 | `java21` |
+| **C#** | 11 | `csharp` |
+| **Kotlin** | 1.9 | `kotlin` |
 | **Python** | 3.9 | `python` |
+| **Python** | 2.7 | `python` |
 | **C** | GCC 11 | `c` |
 | **C++** | GCC 11 | `cpp` |
 | **Go** | 1.21 | `go` |
+| **Javascript** | 18 | `javascript` |
 | **TypeScript** | 5.0 | `typescript` |
 | **Swift** | 5.9 | `swift` |
 | **PHP** | 8.2 | `php` |
