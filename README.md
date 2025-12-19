@@ -1,224 +1,191 @@
-# EvalX - Parallel Code Execution Engine
+# EvalX
+<img width="1046" height="778" alt="image" src="https://github.com/user-attachments/assets/35170b76-223b-4d2b-ac5f-9df934c02614" />
 
-EvalX is a high-performance code execution engine that runs code in isolated Docker containers with support for multiple programming languages and parallel execution.
+> **High-Performance Parallel Code Execution Engine**
 
-## Features
+EvalX is a robust, distributed remote code execution (RCE) engine built with **Rust**. It provides a secure, sandboxed environment to compile and execute untrusted code across multiple programming languages simultaneously.
 
-- Multiple language support (Python, Node.js, etc.)
-- Parallel code execution
-- Configurable concurrent container limits
-- REST API endpoints
-- Isolated Docker environments
+Designed for high throughput and low latency, EvalX leverages **Isolate** for Linux kernel-level sandboxing, **Redis** for distributed task queuing and caching, and **Axum** for a high-performance REST API.
 
-## Setup
+## 🚀 Key Features
 
-1. Install dependencies:
-   - Rust (latest stable)
-   - Docker
-   - curl or Postman for testing
+  * **Secure Sandboxing:** Uses `isolate` (cgroups/namespaces) to strictly limit memory, CPU, processes, and file access.
+  * **Distributed Architecture:** Separates API servers from Execution Workers using a Redis-backed job queue.
+  * **Batch Execution:** Supports "Fan-Out/Fan-In" architecture to compile code once and run against hundreds of test cases in parallel.
+  * **Smart Caching:** Caches compilation artifacts and execution results to minimize redundant processing.
+  * **Observability:** Integrated **Prometheus** metrics and **Grafana** dashboards for real-time monitoring of queue depth, latency, and container usage.
+  * **Multi-Language Support:** First-class support for Java, C, C++, Python, Go, Rust, TypeScript, Swift, PHP, Ruby, and R.
 
-2. Build Docker Images:
-   ```bash
-   ./build-images.ps1
-   ```
+-----
 
-3. Build the project:
-   ```bash
-   cargo build --release
-   ```
+## 🛠️ Architecture
 
-4. Start the server:
-   ```bash
-   cargo run --release
-   ```
+EvalX operates on a Producer-Consumer model:
 
-## Docker Image Configuration
+1.  **API Server:** Receives code requests, checks the cache, and pushes tasks to a **Redis Priority Queue**.
+2.  **Worker Nodes:** Pull tasks, allocate a pre-warmed sandbox from the `LocalSandboxPool`, execute the code securely, and push results back.
+3.  **Notification System:** Uses WebSockets/Long-polling to notify clients immediately upon batch completion.
 
-The project uses Docker images for each supported language and version. Each Dockerfile is configured to:
-- Use slim base images to minimize size
-- Set up a working directory
-- Execute code passed through environment variables
+-----
 
-### Adding New Language Support
+## ⚡ Quick Start
 
-To add support for a new language or version:
+### Prerequisites
 
-1. Create a new Dockerfile (e.g., `Dockerfile.ruby3.0`):
-   ```dockerfile
-   FROM ruby:3.0-slim
-   WORKDIR /app
-   COPY . .
-   CMD ["ruby", "-e", "$CODE"]
-   ```
+  * **Rust** (Latest Stable)
+  * **Docker** & Docker Compose
+  * **Isolate** (Must be installed on the host machine)
 
-2. Build the image:
-   ```bash
-   docker build -t ruby:3.0 -f Dockerfile.ruby3.0 .
-   ```
+### 1\. Start Infrastructure
 
-3. Use in API requests:
-   ```json
-   {
-     "language": "ruby",
-     "version": "3.0",
-     "code": "puts 'Hello from Ruby!'",
-     "timeout": 10
-   }
-   ```
-
-## Testing Parallel Execution
-
-The server provides two main endpoints:
-
-1. Single execution: `POST http://localhost:3000/execute`
-2. Parallel execution: `POST http://localhost:3000/execute-parallel`
-
-### Example: Testing Parallel Execution with Postman
-
-1. Open Postman and create a new POST request to `http://localhost:3000/execute-parallel`
-
-2. Set the request body to raw JSON with this example:
-   ```json
-   [
-      // Java (21) Test Cases
-      {
-        "language": "java",
-        "version": "java-slim-executor",
-        "code": "public class Main { public static void main(String[] args) { System.out.println(\"Hello, World!\"); } }",
-        "timeout": 5,
-        "memory_limit": "256m"
-      },
-      {
-        "language": "java",
-        "version": "java-slim-executor",
-        "code": "import java.util.Scanner; public class Main { public static void main(String[] args) { Scanner sc = new Scanner(System.in); String input = sc.nextLine(); System.out.println(\"Echo: \" + input); } }",
-        "stdin": "Test Input",
-        "timeout": 8,
-        "memory_limit": "1g"
-      },
-
-      // Python (3.9) Test Cases
-      {
-        "language": "python",
-        "version": "3.9",
-        "code": "print(\"Simple Python Test\")",
-        "memory_limit": "128m"
-      },
-      {
-        "language": "python",
-        "version": "3.9",
-        "code": "name = input(\"Enter your name: \")\nprint(f\"Hello, {name}!\")",
-        "stdin": "Alice"
-      },
-
-      // Java 11 Test Cases
-      {
-        "language": "java11",
-        "version": "11",
-        "code": "public class Main { public static void main(String[] args) { System.out.println(\"Java 11 Test\"); } }"
-      },
-      {
-        "language": "java11",
-        "version": "11",
-        "code": "import java.util.Scanner; public class Main { public static void main(String[] args) { Scanner sc = new Scanner(System.in); int n = sc.nextInt(); System.out.println(n * 2); } }",
-        "stdin": "5",
-        "timeout": 10
-      },
-
-      // C (11) Test Cases
-      {
-        "language": "c",
-        "version": "11",
-        "code": "#include <stdio.h>\nint main() { printf(\"C Test\\n\"); return 0; }"
-      },
-      {
-        "language": "c",
-        "version": "11",
-        "code": "#include <stdio.h>\nint main() { char buffer[100]; fgets(buffer, 100, stdin); printf(\"You entered: %s\", buffer); return 0; }",
-        "stdin": "C Input",
-        "memory_limit": "512m"
-      },
-
-      // C++ (11) Test Cases
-      {
-        "language": "cpp",
-        "version": "11",
-        "code": "#include <iostream>\nint main() { std::cout << \"C++ Test\" << std::endl; return 0; }"
-      },
-      {
-        "language": "cpp",
-        "version": "11",
-        "code": "#include <iostream>\n#include <string>\nint main() { std::string input; std::getline(std::cin, input); std::cout << \"C++ Echo: \" << input << std::endl; return 0; }",
-        "stdin": "Hello C++",
-        "timeout": 7
-      }
-  ]
-   ```
-
-3. Send the request. You should see the results arrive together, with Task 3 completing first (no sleep), followed by Tasks 1 and 2 (with 2-second delays).
-
-### Example: Testing with curl
+Spin up the supporting services (Redis, Prometheus, Grafana, AlertManager).
 
 ```bash
-curl -X POST http://localhost:3000/execute-parallel \
-  -H "Content-Type: application/json" \
-  -d '[
-    {
-      "language": "python",
-      "version": "3.9",
-      "code": "print(\"Hello from Python!\")",
-      "timeout": 10
-    },
-    {
-      "language": "node",
-      "version": "16",
-      "code": "console.log(\"Hello from Node!\")",
-      "timeout": 10
-    }
-  ]'
+docker compose up -d
 ```
 
-## Configuration
+### 2\. Build the Engine
 
-Edit `.env` file to configure:
-- `MAX_CONCURRENT_CONTAINERS`: Maximum number of containers that can run simultaneously
-- `DEFAULT_TIMEOUT`: Default timeout for code execution
-- `DOCKER_HOST`: Docker daemon socket location
+Or simply Compile the project in release mode for maximum performance.
 
-## Monitoring Parallel Execution
+```bash
+./start-dev.sh
+```
 
-To verify that code is running in parallel:
+### 3\. Run the Services
 
-1. Send requests with different execution times
-2. Check that total execution time is approximately equal to the longest individual task
-3. Monitor Docker containers:
-   ```bash
-   docker ps
-   ```
-   You should see multiple containers running simultaneously
+You will need two terminal windows to simulate the distributed environment.
 
-## Performance Testing
+**Terminal 1: Start the API Server**
 
-To stress test parallel execution:
+```bash
+./target/release/evalx
+# Server listening on http://localhost:3000
+```
 
-1. Create a large array of execution requests (10+ items)
-2. Include varying execution times
-3. Monitor system resources:
-   ```bash
-   docker stats
-   ```
-4. Verify that execution time scales with container limit, not request count
+**Terminal 2: Start the Execution Worker**
 
+```bash
+sudo ./target/release/evalx worker
+# Worker started, utilizing local sandbox pool
+```
 
+-----
 
+## 🔌 API Usage
 
+EvalX uses an asynchronous submission model. You submit a batch of work, receive a token, and poll for the results.
 
+### 1\. Submit Code Execution (Batch)
 
+Send code with multiple test cases (`stdin` inputs).
 
+**Request:**
+`POST /execute/batch`
 
+```bash
+curl -X POST http://localhost:3000/execute/batch \
+-H "Content-Type: application/json" \
+-d '[
+    {
+        "language": "python",
+        "version": "3.9",
+        "code": "import sys\nname = sys.stdin.read().strip()\nprint(f\"Hello, {name}!\")",
+        "stdin": "Alice",
+        "timeout": 2
+    },
+    {
+        "stdin": "Bob"
+    }
+]'
+```
+
+**Response:**
+
+```json
 {
-  "language": "java",
-  "version": "java-slim-executor",
-  "code": "public class Main { public static void main(String[] args) { System.out.println(\"Task 3dfgxzcv done\"); } }",
-  "timeout": 10
+    "token": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "Queued",
+    "results": null
 }
+```
+
+### 2\. Poll for Results
+
+Check the status of your submission using the token returned above.
+
+**Request:**
+`GET /submissions/:token`
+
+```bash
+curl http://localhost:3000/submissions/550e8400-e29b-41d4-a716-446655440000
+```
+
+**Expected Output (Completed):**
+
+```json
+{
+    "token": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "Completed",
+    "results": [
+        {
+            "stdout": "Hello, Alice!\n",
+            "stderr": null,
+            "exit_code": 0,
+            "run_time": 0.045,
+            "space_consumed": "6452 KB"
+        },
+        {
+            "stdout": "Hello, Bob!\n",
+            "stderr": null,
+            "exit_code": 0,
+            "run_time": 0.042,
+            "space_consumed": "6452 KB"
+        }
+    ]
+}
+```
+
+-----
+
+## 🧹 Maintenance
+
+### Clear Cache
+
+If you need to invalidate all cached compilation artifacts and execution results:
+
+```bash
+docker exec evalx_redis redis-cli KEYS "evalx:artifact:*" | xargs -r docker exec evalx_redis redis-cli DEL
+```
+
+### Emergency Reset
+
+If sandboxes become locked or corrupted due to a crash:
+
+```bash
+./emergency_reset.sh
+```
+
+-----
+
+## 📊 Supported Languages
+
+| Language | Version | Identifier |
+| :--- | :--- | :--- |
+| **Java** | OpenJDK 21 | `java21` |
+| **C#** | 11 | `csharp` |
+| **Kotlin** | 1.9 | `kotlin` |
+| **Python** | 3.9 | `python` |
+| **Python** | 2.7 | `python` |
+| **C** | GCC 11 | `c` |
+| **C++** | GCC 11 | `cpp` |
+| **Go** | 1.21 | `go` |
+| **Javascript** | 18 | `javascript` |
+| **TypeScript** | 5.0 | `typescript` |
+| **Swift** | 5.9 | `swift` |
+| **PHP** | 8.2 | `php` |
+| **Ruby** | 3.2 | `ruby` |
+| **R** | 4.3 | `r` |
+| **SQLite** | 3.43 | `sqlite` |
+
+## Note : Languages can be added simply by defining the configurations in a single file and adding it to the `config/languages`
