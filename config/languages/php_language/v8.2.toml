@@ -1,0 +1,23 @@
+is_compiled = false
+source_filename = "main.php"
+executable_filename = "main.php"
+chroot_path = "/opt/evalx/chroots/php/8.2"
+
+# We mount the standard system folders found INSIDE your chroot.
+# Isolate handles /tmp, /proc, and /dev automatically.
+mount_paths = ["usr", "lib", "lib64", "bin", "sbin", "etc"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+# We include the LD_LIBRARY_PATH from your run script to ensure PHP finds its extensions
+LD_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib:/lib"
+TERM = "xterm"
+
+[compile]
+# PHP is interpreted, no compilation needed
+command = ["echo", "no-compile"]
+
+[run]
+# We use the standard php binary location (which is valid inside the chroot)
+command = ["/usr/bin/php", "main.php"]
+limits = { time_s = 10, memory_kb = 524288, processes = 50 }

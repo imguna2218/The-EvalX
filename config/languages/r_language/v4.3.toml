@@ -1,0 +1,25 @@
+is_compiled = false
+source_filename = "main.R"
+executable_filename = "main.R"
+chroot_path = "/opt/evalx/chroots/r/4.3"
+
+# Standard mounts. NO "dev", NO "tmp" (handled by isolate).
+# R needs "usr", "lib", "etc" for config, and "proc" for system info.
+mount_paths = ["usr", "lib", "lib64", "bin", "sbin", "etc", "proc", "sys"]
+
+[env_vars]
+# Standard PATH
+PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# R specific environment variables
+R_HOME = "/usr/lib/R"
+# Ensure UTF-8 for consistent output
+LANG = "en_US.UTF-8"
+LC_ALL = "en_US.UTF-8"
+
+[compile]
+command = ["echo", "no-compile"]
+
+[run]
+# Run using Rscript. "--vanilla" prevents loading user profile/history files.
+command = ["/usr/bin/Rscript", "--vanilla", "main.R"]
+limits = { time_s = 10, memory_kb = 524288, processes = 100 }

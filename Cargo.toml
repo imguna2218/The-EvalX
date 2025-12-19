@@ -31,3 +31,4 @@ flate2 = "1.0"
 toml = "0.8" # ADDED: For parsing TOML configuration files
 glob = "0.3" # ADDED: For finding all language config files in a directory
 tempfile = "3"
+core_affinity = "0.8"

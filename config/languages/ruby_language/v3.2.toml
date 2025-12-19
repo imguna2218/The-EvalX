@@ -1,0 +1,23 @@
+is_compiled = false
+source_filename = "main.rb"
+executable_filename = "main.rb"
+chroot_path = "/opt/evalx/chroots/ruby/3.2"
+
+# Standard mounts for interpreted languages.
+# "dev" is omitted so Isolate creates a secure /dev.
+# "tmp" is omitted so Isolate creates a secure /tmp.
+mount_paths = ["usr", "lib", "lib64", "bin", "sbin", "etc", "proc", "sys"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+LANG = "C.UTF-8"
+LC_ALL = "C.UTF-8"
+# Ruby gems home, pointing to the writable box directory if needed
+GEM_HOME = "/box/gems"
+
+[compile]
+command = ["echo", "no-compile"]
+
+[run]
+command = ["/usr/bin/ruby", "main.rb"]
+limits = { time_s = 10, memory_kb = 524288, processes = 100 }

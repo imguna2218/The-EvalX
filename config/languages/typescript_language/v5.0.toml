@@ -1,0 +1,22 @@
+is_compiled = true
+source_filename = "main.ts"
+executable_filename = "main.js"
+chroot_path = "/opt/evalx/chroots/typescript/5.0"
+
+# ADDED "dev" to mount_paths. 
+# Node.js/V8 needs /dev/urandom and /dev/null for fast startup.
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "proc", "sys", "dev"]
+
+[env_vars]
+PATH = "/usr/local/bin:/usr/bin:/bin"
+
+[compile]
+# ADDED "--skipLibCheck". 
+# This skips type-checking the massive internal definition files, drastically reducing compile time.
+command = ["/usr/local/bin/tsc", "--skipLibCheck", "--target", "es2020", "--module", "commonjs", "main.ts"]
+limits = { time_s = 20, memory_kb = 1536000, processes = 150}
+
+[run]
+command = ["/usr/local/bin/node", "main.js"]
+# Increased to 1GB for safety during runtime
+limits = { time_s = 10, memory_kb = 1048576, processes = 50 }

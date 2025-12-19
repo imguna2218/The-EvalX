@@ -1,0 +1,22 @@
+is_compiled = false
+source_filename = "main.sql"
+executable_filename = "main.sql"
+chroot_path = "/opt/evalx/chroots/sqlite/3.43"
+
+# Standard mounts.
+# NO "dev" or "tmp" (handled by isolate default).
+mount_paths = ["usr", "lib", "lib64", "bin", "etc"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+LD_LIBRARY_PATH = "/usr/lib:/lib:/lib64:/usr/lib64"
+# SQLite sometimes needs a writable directory for temporary files
+HOME = "/tmp"
+
+[compile]
+command = ["echo", "no-compile"]
+
+[run]
+# We use sh -c to handle the file input redirection properly
+command = ["/bin/sh", "-c", "/usr/bin/sqlite3 context.db '.read main.sql'"]
+limits = { time_s = 5, memory_kb = 262144, processes = 50 }

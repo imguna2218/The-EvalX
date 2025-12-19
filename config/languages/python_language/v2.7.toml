@@ -1,0 +1,20 @@
+is_compiled = false
+source_filename = "main.py"
+executable_filename = "main.py"
+chroot_path = "/opt/evalx/chroots/python/v2.7"
+
+# Python 2 needs access to standard libraries and devices
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "var", "dev", "proc", "sys"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+PYTHONPATH = "/usr/lib/python2.7:/usr/lib/python2.7/dist-packages"
+
+[compile]
+# Python is interpreted, so we skip compilation
+command = ["echo", "no-compile"]
+
+[run]
+# We use the /usr/bin/python2 binary explicitly
+command = ["/usr/bin/python2", "main.py"]
+limits = { time_s = 10, memory_kb = 262144, processes = 50 }

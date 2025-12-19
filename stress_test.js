@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:3000';
+const BASE_URL = 'http://98.130.50.3:3000';
 const NUM_USERS = 50; // Number of concurrent users
 const POLLING_INTERVAL_MS = 250;
 const MAX_POLLS = 80; // 80 * 250ms = 20 seconds timeout
@@ -12,7 +12,7 @@ const getStdinForLanguage = (language) => {
             return `A_random_string_${Math.random().toString(36).substring(7)}`;
         case "python":
             return `${Math.floor(Math.random() * 150) + 50}`; // Primes up to 50-199
-        case "java24":
+        case "java21":
             return "the quick brown fox jumps over the lazy dog";
         default:
             return "default_input";
@@ -29,7 +29,7 @@ int factorial(int n) {
     if (n < 0) return -1;
     if (n <= 1) return 1;
     return n * factorial(n - 1);
-}
+}   
 int main() {
     int num = 0;
     scanf("%d", &num);
@@ -73,24 +73,25 @@ except (ValueError, IndexError):
 });
 
 const getJavaCode = (id) => ({
-    language: "java24",
-    version: "24",
+    language: "java21",
+    version: "21",
     code: `import java.util.HashMap;
 import java.util.Map;
-import java.util.Scanner; // ADDED: Import Scanner
+import java.util.Scanner;
+
 // Unique ID: ${id}
-void main() {
-    // CORRECTED: System.console() is null in a non-interactive sandbox.
-    // Use Scanner(System.in) to read the redirected stdin.
-    Scanner scanner = new Scanner(System.in);
-    String text = scanner.nextLine(); 
-    
-    String[] words = text.toLowerCase().split("\\\\s+");
-    Map<String, Integer> wordCount = new HashMap<>();
-    for (String word : words) {
-        wordCount.put(word, wordCount.getOrDefault(word, 0) + 1);
+public class Main {
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+        String text = scanner.nextLine();
+        
+        String[] words = text.toLowerCase().split("\\\\s+");
+        Map<String, Integer> wordCount = new HashMap<>();
+        for (String word : words) {
+            wordCount.put(word, wordCount.getOrDefault(word, 0) + 1);
+        }
+        wordCount.forEach((key, value) -> System.out.println(key + ": " + value));
     }
-    wordCount.forEach((key, value) -> System.out.println(key + ": " + value));
 }`
 });
 
@@ -101,7 +102,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Language distribution helper for consistent mix
 function getLanguageForUser(userId) {
-    const languages = ['c', 'cpp', 'python', 'java24'];
+    const languages = ['c', 'cpp', 'python', 'java21'];
     return languages[userId % languages.length];
 }
 
@@ -111,7 +112,7 @@ function getCodeFunctionForLanguage(language) {
         case 'c': return getCCode;
         case 'cpp': return getCppCode;
         case 'python': return getPythonCode;
-        case 'java24': return getJavaCode;
+        case 'java21': return getJavaCode;
         default: return getCCode;
     }
 }
@@ -214,7 +215,7 @@ async function main() {
     console.log(`Request Type: /execute/batch only`);
     console.log(`Batch Size: 20 test cases per request`);
     console.log(`Target Total Test Cases: ${NUM_USERS * 20}`);
-    console.log(`Language Distribution: C, C++, Python, Java24 (round-robin)`);
+    console.log(`Language Distribution: C, C++, Python, Java21 (round-robin)`);
     console.log('====================================================\n');
 
     const userPromises = Array.from({ length: NUM_USERS }, (_, i) => simulateUser(i + 1));

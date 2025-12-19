@@ -209,8 +209,14 @@ impl IsolateSandbox {
         let sandbox = PrewarmedSandbox::new(pool).await?;
         let box_id = sandbox.box_id;
 
-        // --- DEFINE box_path HERE ---
+        // 1. Define paths
         let box_path = format!("/var/local/lib/isolate/{}/box", box_id);
+        let source_file_host_path = format!("{}/{}", box_path, &config.source_filename);
+        let executable_file_host_path = format!("{}/{}", box_path, &config.executable_filename);
+        let stderr_file_host_path = format!("{}/stderr.txt", box_path);
+
+        // 2. Write the source code from the HOST (Safe & Reliable)
+        fs::write(&source_file_host_path, code).await?;
 
         let execution_result = async {
             let start_time = Instant::now();
@@ -219,57 +225,31 @@ impl IsolateSandbox {
             let mem_limit_kb = limits.memory_kb;
             let process_count = limits.processes;
 
-            // --- Use box_path defined outside ---
-            // let box_path = format!("/var/local/lib/isolate/{}/box", box_id); // REMOVE THIS LINE
+            // 3. Build Command (No more printf!)
+            let mut cmd = self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
 
-            let source_file_sandbox_path = format!("/box/{}", &config.source_filename);
-            let stderr_file_sandbox_path = "/box/stderr.txt";
-            let executable_file_sandbox_path = format!("/box/{}", &config.executable_filename);
-
-            // --- Debug --version check (optional) ---
-            // ... (rest of the debug block, uses box_path) ...
-
-            let mut cmd =
-                self.build_base_command(box_id, config, time_limit_s, mem_limit_kb, process_count);
-
-            let compile_command_str = config.compile.command.join(" ");
-            let bash_command = format!(
-                "printf '%s' \"$1\" > \"{}\" && cd /box && {} 2> \"{}\"; exit $?",
-                source_file_sandbox_path,
-                compile_command_str,
-                stderr_file_sandbox_path
-            );
+            // Construct the compile command to run INSIDE the sandbox
+            // We redirect stderr to stderr.txt to capture compiler warnings/errors
+            let compile_cmd = config.compile.command.join(" ");
+            let bash_command = format!("{} 2> stderr.txt", compile_cmd);
 
             cmd.arg("--run").arg("--")
-            .arg("/bin/bash")
-            .arg("-c")
-            .arg(bash_command)
-            .arg("bash")
-            .arg(code);
+                .arg("/bin/bash")
+                .arg("-c")
+                .arg(bash_command);
 
-            debug!("Executing compile command via bash -c (writing file inside): {:?}", cmd);
+            debug!("Executing compile command: {:?}", cmd);
 
             let child = cmd.spawn()?;
             let child_id = child.id().unwrap_or(0);
             let execution_future = child.wait_with_output();
             let timeout_duration = Duration::from_secs(time_limit_s + 2);
 
-            // --- Timeout logic ---
             let output = match tokio::time::timeout(timeout_duration, execution_future).await {
-                // ... (timeout handling as before, uses box_id) ...
-                Ok(Ok(output)) => {
-                    let isolate_stderr_str = String::from_utf8_lossy(&output.stderr);
-                    if !isolate_stderr_str.is_empty() {
-                        warn!("Isolate stderr (compile, box {}): {}", box_id, isolate_stderr_str);
-                    }
-                    output
-                }
+                Ok(Ok(output)) => output,
                 Ok(Err(e)) => return Err(anyhow!("Compile process failed to execute: {}", e)),
                 Err(_) => {
-                    error!(
-                        "Compile command for '{}' (PID: {}) timed out after {:?}. Killing.",
-                        config.name, child_id, timeout_duration
-                    );
+                    error!("Compile timed out. Killing PID {}", child_id);
                     let _ = Command::new("kill").arg("-9").arg(child_id.to_string()).status().await;
                     sleep(Duration::from_millis(50)).await;
                     return Ok(CompilationResult {
@@ -283,16 +263,12 @@ impl IsolateSandbox {
 
             let compile_time = start_time.elapsed().as_secs_f64();
 
-            // --- Use box_path defined outside ---
-            let stderr_file_host_path = format!("{}/stderr.txt", box_path);
-            let executable_file_host_path = format!("{}/{}", box_path, &config.executable_filename);
-
             if output.status.success() {
+                // Success: Read binary and cleanup
                 let binary = fs::read(&executable_file_host_path).await?;
-                let compiler_warnings = fs::read_to_string(&stderr_file_host_path)
-                                        .await
-                                        .unwrap_or_default();
-                let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
+                let compiler_warnings = fs::read_to_string(&stderr_file_host_path).await.unwrap_or_default();
+                let _ = fs::remove_file(&stderr_file_host_path).await;
+
                 Ok(CompilationResult {
                     success: true,
                     compile_time,
@@ -300,22 +276,16 @@ impl IsolateSandbox {
                     stderr: compiler_warnings,
                 })
             } else {
-                let compiler_error = fs::read_to_string(&stderr_file_host_path)
-                                        .await
-                                        .unwrap_or_else(|e| format!("Failed to read compiler stderr.txt: {}", e));
-                let _ = fs::remove_file(&stderr_file_host_path).await; // Cleanup stderr file
+                // Failure: Read error logs
+                let compiler_error = fs::read_to_string(&stderr_file_host_path).await.unwrap_or_default();
                 let isolate_stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let _ = fs::remove_file(&stderr_file_host_path).await;
 
                 let final_stderr = if !compiler_error.is_empty() {
                     compiler_error
-                } else if !isolate_stderr.is_empty() {
-                    format!("Compilation failed. Isolate stderr: {}", isolate_stderr)
                 } else {
-                    format!("Compilation failed with exit code {:?} but no error message captured.", output.status.code())
+                    format!("Compilation failed (Exit {}). Isolate: {}", output.status.code().unwrap_or(-1), isolate_stderr)
                 };
-
-                error!("Compilation failed for '{}' (Box {}). Exit code: {:?}. Captured stderr: {}",
-                    config.name, box_id, output.status.code(), final_stderr);
 
                 Ok(CompilationResult {
                     success: false,
@@ -324,12 +294,10 @@ impl IsolateSandbox {
                     stderr: final_stderr,
                 })
             }
-        }
-        .await; // End of the async block
+        }.await;
 
-        // --- Use box_path defined outside for cleanup ---
-        let source_file_host_path = format!("{}/{}", box_path, &config.source_filename);
-        let _ = fs::remove_file(&source_file_host_path).await; // Cleanup source file
+        // Cleanup source file
+        let _ = fs::remove_file(&source_file_host_path).await;
 
         execution_result
     }
@@ -510,10 +478,17 @@ impl IsolateSandbox {
     ) -> Command {
         let mut cmd = Command::new("isolate");
         cmd.arg("--cg").arg(format!("--box-id={}", box_id));
+        cmd.arg("--open-files=2048");
 
         if let Some(chroot_path) = &config.chroot_path {
             for path in &config.mount_paths {
-                cmd.arg(format!("--dir=/{0}={1}/{0}", path, chroot_path));
+                if path == "dev" {
+                    cmd.arg(format!("--dir=/{0}={1}/{0}:dev:rw", path, chroot_path));
+                } else if path == "go_cache" {
+                     cmd.arg(format!("--dir=/{0}={1}/{0}:rw", path, chroot_path));
+                } else {
+                    cmd.arg(format!("--dir=/{0}={1}/{0}", path, chroot_path));
+                }
             }
         }
 
@@ -521,15 +496,16 @@ impl IsolateSandbox {
             cmd.arg(format!("--env={}={}", key, val));
         }
 
-        cmd.arg("--dir=/tmp=/tmp:rw");
+        cmd.arg("--dir=/tmp:tmp");
+        cmd.arg("--dir=/proc=proc:fs");
 
         cmd.arg("--stdout=stdout.txt")
         .arg("--stderr=stderr.txt")
         .arg(format!("--time={}", time))
         .arg(format!("--wall-time={}", time * 2))
         .arg(format!("--cg-mem={}", mem))
-        .arg(format!("--mem={}", mem))
-        .arg(format!("--fsize={}", 1024 * 1024))
+        .arg("--mem=0")
+        // .arg(format!("--fsize={}", 1024 * 1024))
         .arg(format!("--processes={}", proc));
         cmd
     }
