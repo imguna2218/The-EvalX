@@ -1,53 +1,41 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore, broadcast};
-use std::collections::HashMap;
-use bollard::Docker;
-use crate::models::request::ExecutionRequest;
+use tokio::sync::{Semaphore, Mutex, RwLock};
+use std::time::Instant;
+use sysinfo::System;
+use crate::caching::redis_client::RedisClient;
 use crate::models::response::EvaluationResult;
+use crate::languages::manager::LanguageRegistry;
 
-#[derive(Debug, Clone)]
-pub struct LanguageConfig {
-    pub image: String,
-    pub command_format: Vec<String>,
-    pub resource_limits: ContainerResourceLimits,
-    pub env: Vec<String>,
+
+/// ADDED: Represents the two operational states for concurrency control.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConcurrencyState {
+    Nominal,
+    Strained,
 }
 
-#[derive(Debug, Clone)]
-pub struct ContainerResourceLimits {
-    pub memory: String,
-    pub cpu_shares: i64,
-}
 
-#[derive(Debug, Clone)]
-pub struct ExecutionTask {
-    pub id: String,
-    pub requests: Vec<ExecutionRequest>,
-    pub task_type: ExecutionTaskType,
-    pub notification_tx: Arc<broadcast::Sender<ExecutionNotification>>,
-}
-
-#[derive(Debug, Clone)]
-pub enum ExecutionTaskType {
-    Single,
-    Parallel,
-    Batch,
-}
-
-#[derive(Debug, Clone)]
 pub struct CodeExecutor {
-    pub docker: Docker,
     pub semaphore: Arc<Semaphore>,
-    pub container_pool: Arc<Mutex<HashMap<String, Vec<String>>>>,
-    pub language_configs: HashMap<String, LanguageConfig>,
-    pub task_queue: Arc<Mutex<Vec<ExecutionTask>>>,
-    pub task_notify: Arc<tokio::sync::Notify>,
+    pub system: Arc<Mutex<System>>,
+    pub redis_client: RedisClient,
+    pub concurrency_state: Arc<RwLock<(ConcurrencyState, Instant)>>,
+    pub language_registry: Arc<LanguageRegistry>,
 }
+
+impl std::fmt::Debug for CodeExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeExecutor")
+            .field("semaphore", &self.semaphore)
+            .finish_non_exhaustive()
+    }
+}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionNotification {
     pub id: String,
     pub status: String,
-    pub result: Option<EvaluationResult>,
+    pub results: Option<Vec<EvaluationResult>>,
 }

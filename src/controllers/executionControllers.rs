@@ -1,254 +1,183 @@
 use axum::{
-    extract::{State, Json},
+    extract::{Json, Path, State},
 };
-use std::sync::Arc;
-use uuid::Uuid;
-use std::env;
-use tracing::debug;
-use tokio::sync::broadcast;
-use crate::types::index::{CodeExecutor, ExecutionNotification, ExecutionTask, ExecutionTaskType};
-use crate::models::request::ExecutionRequest;
-use crate::models::response::EvaluationResult;
-use crate::AppResponse;
-use crate::caching::redis_client::RedisClient;
-use crate::queue_management::{QueueManager, ExecutionType};
-use sha2::{Sha256, Digest};
+use anyhow::anyhow;
 use hex::ToHex;
+use sha2::{Digest, Sha256};
+use std::env;
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 
+use crate::caching::redis_client::RedisClient;
+use crate::models::request::ExecutionRequest;
+use crate::models::response::{EvaluationResult, SubmissionResponse, SubmissionStatus};
+use crate::queue_management::QueueManager;
+use crate::queue_management::task::CompileTask;
+use crate::queue_management::ExecutionTask;
+use crate::types::index::{CodeExecutor, ExecutionNotification};
+use crate::AppResponse;
+
+/// Handles a single code execution request.
+/// This is now a wrapper that treats the single request as a "batch of one".
 pub async fn handle_execute(
-    State((_executor, tx, mut redis_client, queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
+    State((_executor, tx, redis_client, queue_manager)): State<(
+        Arc<CodeExecutor>,
+        Arc<broadcast::Sender<ExecutionNotification>>,
+        RedisClient,
+        Arc<QueueManager>,
+    )>,
     Json(request): Json<ExecutionRequest>,
-) -> AppResponse<EvaluationResult> {
-    if let Some(timeout) = request.timeout {
-        if timeout < 0.0 {
-            return AppResponse(Err(anyhow::anyhow!(
-                "Invalid timeout value: timeout cannot be negative"
-            )));
-        }
-    }
-
-    let execution_id = Uuid::new_v4().to_string();
-    
-    let _ = tx.send(ExecutionNotification {
-        id: execution_id.clone(),
-        status: "queued".to_string(),
-        result: None,
-    });
-    
+) -> AppResponse<SubmissionResponse> {
+    // --- 1. Quick Cache Check for Single, Simple Executions ---
+    // This provides an immediate response for frequently run, identical code snippets.
+    let language = request.language.as_ref().unwrap_or(&"".to_string()).to_string();
+    let version = request.version.as_ref().unwrap_or(&"".to_string()).to_string();
+    let code = request.code.as_ref().unwrap_or(&"".to_string()).to_string();
+    let stdin = request.stdin.clone();
+    // FIX: Read the default timeout from the environment instead of hardcoding it.
+    let default_timeout: u64 = env::var("DEFAULT_TIMEOUT")
+        .unwrap_or_else(|_| "10".to_string())
+        .parse()
+        .unwrap_or(10);
+    let timeout = request.timeout.unwrap_or(default_timeout);
     let cache_key = format!(
         "evalx:exec:{}:{}:{}:{}:{}",
-        request.language,
-        request.version,
-        request.timeout.unwrap_or(1.0),
-        Sha256::digest(&request.code).encode_hex::<String>(),
-        request.stdin.as_ref().map_or("".to_string(), |s| Sha256::digest(s.as_bytes()).encode_hex::<String>())
+        language,
+        version,
+        timeout,
+        Sha256::digest(&code).encode_hex::<String>(),
+        Sha256::digest(&stdin).encode_hex::<String>()
     );
-  
-    if let Ok(Some(cached_result)) = redis_client.get_from_cache(&cache_key) {
-        debug!("Cache hit for key: {}", cache_key);
-        return AppResponse(Ok(cached_result));
+    // Using a block to scope the mutable redis_client
+    if let Ok(Some(cached_result)) = redis_client.get_from_cache_async(&cache_key, Some(&language)).await {
+        debug!("Single execution cache hit for key: {}", cache_key);
+        return AppResponse(Ok(SubmissionResponse {
+            token: "cached".to_string(),
+            status: SubmissionStatus::Completed,
+            results: Some(vec![cached_result]),
+        }));
     }
 
-    let results = match queue_manager.add_task(vec![request], ExecutionType::Single, 1, redis_client).await {
-        Ok(results) => results,
-        Err(e) => return AppResponse(Err(anyhow::anyhow!("Failed to add task: {}", e))),
+    // --- 2. Unified Batch Queuing ---
+    let parent_token = Uuid::new_v4().to_string();
+    let compile_task = CompileTask {
+        parent_token: parent_token.clone(),
+        requests: vec![request],
     };
-    
-    if !results.is_empty() {
-        // Immediate execution occurred
-        return AppResponse(Ok(results[0].clone()));
-    }
+    let task = ExecutionTask::CompileBatch(compile_task);
 
-    let mut rx = tx.subscribe();
-    loop {
-        if let Ok(notification) = rx.recv().await {
-            if notification.id == execution_id {
-                match notification.status.as_str() {
-                    "completed" => {
-                        if let Some(result) = notification.result {
-                            return AppResponse(Ok(result));
-                        }
-                    }
-                    "failed" => {
-                        if let Some(result) = notification.result {
-                            return AppResponse(Ok(result));
-                        }
-                        return AppResponse(Err(anyhow::anyhow!("Execution failed without result")));
-                    }
-                    _ => continue,
-                }
-            }
-        }
-    }
-}
-
-pub async fn handle_execute_parallel(
-    State((_executor, tx, redis_client, _queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
-    Json(requests): Json<Vec<ExecutionRequest>>,
-) -> AppResponse<Vec<EvaluationResult>> {
-    // Validate all requests
-    for request in &requests {
-        if let Some(timeout) = request.timeout {
-            if timeout < 0.0 {
-                return AppResponse(Err(anyhow::anyhow!(
-                    "Invalid timeout value: timeout cannot be negative"
-                )));
-            }
-        }
-    }
-
-    let execution_id = Uuid::new_v4().to_string();
-    
-    let max_requests = env::var("MAX_REQUESTS").unwrap_or_else(|_| "100".to_string()).parse::<usize>().unwrap();
-    if requests.len() > max_requests {
-        return AppResponse(Err(anyhow::anyhow!("Max requests exceeded. Max allowed requests: {}", max_requests)));
-    }
-    
-    debug!("Queuing parallel task with ID: {}", execution_id);
-    let _ = tx.send(ExecutionNotification {
-        id: execution_id.clone(),
-        status: "queued".to_string(),
-        result: None,
-    });
-
-    let task = ExecutionTask {
-        id: execution_id.clone(),
-        requests: requests.clone(),
-        task_type: ExecutionTaskType::Parallel,
-        notification_tx: tx.clone(),
-    };
-
+    info!("Queuing single request as CompileBatch task: {}", parent_token);
+    match queue_manager
+        .add_task(task, 1, redis_client)
+        .await
     {
-        let mut queue = _executor.task_queue.lock().await;
-        queue.push(task);
-        _executor.task_notify.notify_one();
-    }
-
-    let mut rx = tx.subscribe();
-    let mut results = Vec::new();
-    loop {
-        if let Ok(notification) = rx.recv().await {
-            debug!("Received notification for ID {}: {:?}", execution_id, notification);
-            if notification.id == execution_id {
-                match notification.status.as_str() {
-                    "completed" => {
-                        if let Some(result) = notification.result {
-                            results.push(result);
-                            if results.len() == requests.len() {
-                                debug!("All results collected for ID {}: {:?}", execution_id, results);
-                                return AppResponse(Ok(results));
-                            }
-                        }
-                    }
-                    "failed" => {
-                        debug!("Execution failed for ID {}", execution_id);
-                        return AppResponse(Err(anyhow::anyhow!("Execution failed")));
-                    }
-                    _ => continue,
-                }
-            }
+        Ok(_) => {
+            let _ = tx.send(ExecutionNotification {
+                id: parent_token.clone(),
+                status: "queued".to_string(),
+                
+                results: None,
+            });
+            AppResponse(Ok(SubmissionResponse {
+                token: parent_token,
+                status: SubmissionStatus::Queued,
+                results: None,
+            }))
         }
+        Err(e) => AppResponse(Err(anyhow!("Failed to add task: {}", e))),
     }
 }
+
 
 pub async fn handle_execute_batch(
-    State((_executor, tx, redis_client, queue_manager)): State<(Arc<CodeExecutor>, Arc<broadcast::Sender<ExecutionNotification>>, RedisClient, Arc<QueueManager>)>,
+    State((_executor, tx, redis_client, queue_manager)): State<(
+        Arc<CodeExecutor>,
+        Arc<broadcast::Sender<ExecutionNotification>>,
+        RedisClient,
+        Arc<QueueManager>,
+    )>,
     Json(requests): Json<Vec<ExecutionRequest>>,
-) -> AppResponse<Vec<EvaluationResult>> {
-    // Validate all requests
-    for request in &requests {
-        if let Some(timeout) = request.timeout {
-            if timeout < 0.0 {
-                return AppResponse(Err(anyhow::anyhow!(
-                    "Invalid timeout value: timeout cannot be negative"
-                )));
-            }
-        }
-    }
-
-    // Check if the batch is empty
+) -> AppResponse<SubmissionResponse> {
     if requests.is_empty() {
-        return AppResponse(Err(anyhow::anyhow!("Batch request list cannot be empty")));
+        return AppResponse(Err(anyhow!("Batch request list cannot be empty")));
     }
 
-    // Validate the first request
-    let first_request = &requests[0];
-    if first_request.language.trim().is_empty() {
-        return AppResponse(Err(anyhow::anyhow!(
-            "The first request in a batch must contain a non-empty language"
-        )));
-    }
-    if first_request.version.trim().is_empty() {
-        return AppResponse(Err(anyhow::anyhow!(
-            "The first request in a batch must contain a non-empty version"
-        )));
-    }
-
-    // For all supported languages, ensure the first request has non-empty code
-    let is_supported_language = matches!(
-        first_request.language.as_str(),
-        "java" | "java11" | "c" | "cpp" | "python" | "javascript"
-    );
-    if is_supported_language && first_request.code.trim().is_empty() {
-        return AppResponse(Err(anyhow::anyhow!(
-            "The first request in a batch for language '{}' must contain non-empty code",
-            first_request.language
-        )));
-    }
-
-    let execution_id = Uuid::new_v4().to_string();
-    
-    let max_requests = env::var("MAX_REQUESTS")
-        .unwrap_or_else(|_| "100".to_string())
-        .parse::<usize>()
-        .unwrap();
-    if requests.len() > max_requests {
-        return AppResponse(Err(anyhow::anyhow!(
-            "Max requests exceeded. Max allowed requests: {}",
-            max_requests
-        )));
-    }
-    
-    debug!("Queuing batch task with ID: {}", execution_id);
-    let _ = tx.send(ExecutionNotification {
-        id: execution_id.clone(),
-        status: "queued".to_string(),
-        result: None,
-    });
-
-    let results = match queue_manager.add_task(requests.clone(), ExecutionType::Batch, 1, redis_client).await {
-        Ok(results) => results,
-        Err(e) => return AppResponse(Err(anyhow::anyhow!("Failed to add task: {}", e))),
+    let parent_token = Uuid::new_v4().to_string();
+    let compile_task = CompileTask {
+        parent_token: parent_token.clone(),
+        requests,
     };
-    
-    if !results.is_empty() {
-        // Immediate execution occurred
-        return AppResponse(Ok(results));
-    }
+    let task = ExecutionTask::CompileBatch(compile_task);
 
-    let mut rx = tx.subscribe();
-    let mut results = Vec::new();
-    loop {
-        if let Ok(notification) = rx.recv().await {
-            debug!("Received notification for ID {}: {:?}", execution_id, notification);
-            if notification.id == execution_id {
-                match notification.status.as_str() {
-                    "completed" => {
-                        if let Some(result) = notification.result {
-                            results.push(result);
-                            if results.len() == requests.len() {
-                                debug!("All results collected for ID {}: {:?}", execution_id, results);
-                                return AppResponse(Ok(results));
-                            }
-                        }
-                    }
-                    "failed" => {
-                        debug!("Execution failed for ID {}", execution_id);
-                        return AppResponse(Err(anyhow::anyhow!("Execution failed")));
-                    }
-                    _ => continue,
+    info!("Queuing batch request as CompileBatch task: {}", parent_token);
+    match queue_manager
+        .add_task(task, 1, redis_client)
+        .await
+    {
+        Ok(_) => {
+            info!("Validated and queued batch task with ID: {}", parent_token);
+            let _ = tx.send(ExecutionNotification {
+                id: parent_token.clone(),
+                status: "queued".to_string(),
+                results: None,
+            });
+            AppResponse(Ok(SubmissionResponse {
+                token: parent_token,
+                status: SubmissionStatus::Queued,
+                results: None,
+            }))
+        }
+        Err(e) => AppResponse(Err(anyhow!("Failed to add task: {}", e))),
+    }
+}
+
+/// Handles polling for the status and result of a submission token.
+pub async fn handle_submission_status(
+    State((_executor, _tx, redis_client, _queue_manager)): State<(
+        Arc<CodeExecutor>,
+        Arc<broadcast::Sender<ExecutionNotification>>,
+        RedisClient,
+        Arc<QueueManager>,
+    )>,
+    Path(token): Path<String>,
+) -> AppResponse<SubmissionResponse> {
+    let result_key = format!("result:{}", token);
+    let status_key = format!("status:{}", token);
+
+    // FIXED: Added the missing `None` argument.
+    match redis_client.get_from_cache_async::<Vec<EvaluationResult>>(&result_key, None).await {
+        Ok(Some(results)) => {
+            debug!("Found completed results for token: {}", token);
+            AppResponse(Ok(SubmissionResponse {
+                token,
+                status: SubmissionStatus::Completed,
+                results: Some(results),
+            }))
+        }
+        Ok(None) => {
+            // FIXED: Added the missing `None` argument.
+            match redis_client.get_from_cache_async::<String>(&status_key, None).await {
+                Ok(Some(status)) if status == "processing" => {
+                    debug!("Task is processing for token: {}", token);
+                    AppResponse(Ok(SubmissionResponse {
+                        token,
+                        status: SubmissionStatus::Processing,
+                        results: None,
+                    }))
+                }
+                _ => {
+                    // This can mean it's queued or the token is invalid/expired.
+                    debug!("No results yet for token: {}", token);
+                    AppResponse(Ok(SubmissionResponse {
+                        token,
+                        status: SubmissionStatus::Queued,
+                        results: None,
+                    }))
                 }
             }
         }
+        Err(e) => AppResponse(Err(anyhow!("Failed to check submission status: {}", e))),
     }
 }

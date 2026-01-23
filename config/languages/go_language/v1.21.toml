@@ -1,0 +1,26 @@
+is_compiled = true
+source_filename = "main.go"
+executable_filename = "main"
+chroot_path = "/opt/evalx/chroots/go/1.21"
+
+# ADDED "go_cache" here so the Rust code mounts it
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "proc", "sys", "dev", "go_cache"]
+
+[env_vars]
+PATH = "/usr/local/go/bin:/usr/bin:/bin"
+GOROOT = "/usr/local/go"
+# CHANGED: Point to the mounted, persistent cache
+GOCACHE = "/go_cache"
+GOMODCACHE = "/tmp/gomod"
+GOMEMLIMIT = "240MiB"
+CGO_ENABLED = "0"
+GOMAXPROCS = "4" 
+
+[compile]
+# Keep the single quotes!
+command = ["/usr/local/go/bin/go", "build", "-trimpath", "-ldflags='-s -w'", "-o", "main", "main.go"]
+limits = { time_s = 20, memory_kb = 1048576, processes = 200 }
+
+[run]
+command = ["/bin/bash", "-c", "export GOMAXPROCS=1 && ./main"]
+limits = { time_s = 5, memory_kb = 1048576, processes = 200 }

@@ -4,6 +4,8 @@ use serde::{Serialize, Deserialize};
 pub struct Artifact {
     pub code: String,
     pub binary: Vec<u8>,
+    /// ADDED: Flag to indicate if the binary is GZIP compressed.
+    pub compressed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -14,6 +16,22 @@ pub struct EvaluationResult {
     pub exit_code: i64,
     pub run_time: f64,
     pub space_consumed: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SubmissionResponse {
+    pub token: String,
+    pub status: SubmissionStatus,
+    // CHANGED: This now holds a vector of results to support batches.
+    pub results: Option<Vec<EvaluationResult>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SubmissionStatus {
+    Queued,
+    Processing,
+    Completed,
+    Failed,
 }
 
 impl EvaluationResult {

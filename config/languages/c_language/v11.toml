@@ -1,0 +1,16 @@
+is_compiled = true
+source_filename = "main.c"
+executable_filename = "main"
+chroot_path = "/opt/evalx/chroots/c/v11"
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "var"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+
+[compile]
+command = ["/usr/bin/gcc", "-std=c11", "-O2", "-o", "main", "main.c", "-lm"]
+limits = { time_s = 10, memory_kb = 262144, processes = 500 }
+
+[run]
+command = ["./main"]
+limits = { time_s = 10, memory_kb = 262144, processes = 500 }

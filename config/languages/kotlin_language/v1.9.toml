@@ -1,0 +1,32 @@
+is_compiled = true
+source_filename = "Main.kt"
+executable_filename = "Main.jar"
+chroot_path = "/opt/evalx/chroots/kotlin/1.9"
+
+# STABLE MOUNTS: Do not add "dev" unless you confirm the chroot has /dev/urandom
+mount_paths = ["usr", "lib", "lib64", "bin", "sbin", "etc", "sys", "var"]
+
+[env_vars]
+JAVA_HOME = "/usr/lib/jvm/java-21-openjdk-amd64"
+PATH = "/usr/local/kotlinc/bin:/usr/lib/jvm/java-21-openjdk-amd64/bin:/usr/bin:/bin"
+LD_LIBRARY_PATH = "/usr/lib/jvm/java-21-openjdk-amd64/lib/jli:/usr/lib/jvm/java-21-openjdk-amd64/lib/server:/usr/lib/jvm/java-21-openjdk-amd64/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+HOME = "/box"
+
+[compile]
+# OPTIMIZATION: -J-XX:TieredStopAtLevel=1 makes the compiler start faster.
+command = ["/usr/local/kotlinc/bin/kotlinc", "-J-XX:TieredStopAtLevel=1", "Main.kt", "-include-runtime", "-d", "Main.jar"]
+limits = { time_s = 30, memory_kb = 1536000, processes = 500 }
+
+[run]
+command = [
+    "/usr/lib/jvm/java-21-openjdk-amd64/bin/java",
+    "-Xmx1024m",
+    "-XX:+UseSerialGC",
+    "-XX:ActiveProcessorCount=1",
+    "-Djava.io.tmpdir=/box",
+    "-Duser.home=/box",
+    "-XX:-PrintWarnings",
+    "-jar", 
+    "Main.jar"
+]
+limits = { time_s = 15, memory_kb = 1048576, processes = 200 }

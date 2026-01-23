@@ -1,0 +1,24 @@
+is_compiled = true
+source_filename = "main.swift"
+executable_filename = "main"
+chroot_path = "/opt/evalx/chroots/swift/5.9"
+
+# Standard mounts.
+# NO "proc" (handled by isolate manually in Rust code).
+# NO "dev" or "tmp" (handled by isolate default).
+mount_paths = ["usr", "lib", "lib64", "bin", "sbin", "etc", "sys"]
+
+[env_vars]
+PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+LANG = "en_US.UTF-8"
+# CRITICAL FIX: Point HOME to /box so the cache is private and writable
+HOME = "/box"
+LD_LIBRARY_PATH = "/usr/lib/swift/host:/usr/lib/swift/linux:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+
+[compile]
+command = ["/usr/bin/swiftc", "-O", "main.swift", "-o", "main"]
+limits = { time_s = 30, memory_kb = 1048576, processes = 150 }
+
+[run]
+command = ["./main"]
+limits = { time_s = 10, memory_kb = 524288, processes = 50 }

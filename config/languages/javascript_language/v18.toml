@@ -1,0 +1,20 @@
+is_compiled = false
+source_filename = "main.js"
+executable_filename = "main.js"
+chroot_path = "/opt/evalx/chroots/javascript/v18"
+
+# Standard mounts for a Node.js environment
+mount_paths = ["usr", "lib", "lib64", "bin", "etc", "var", "dev", "proc", "sys"]
+
+[env_vars]
+PATH = "/usr/bin:/bin"
+NODE_PATH = "/usr/lib/node_modules"
+
+[compile]
+# JavaScript is interpreted, so we use a dummy compile command
+command = ["echo", "no-compile"]
+
+[run]
+# We run the script using the node binary inside the chroot
+command = ["/usr/bin/node", "main.js"]
+limits = { time_s = 10, memory_kb = 524288, processes = 50 }
