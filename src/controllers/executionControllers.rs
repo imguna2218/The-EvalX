@@ -22,6 +22,7 @@ use crate::AppResponse;
 /// Handles a single code execution request.
 /// This is now a wrapper that treats the single request as a "batch of one".
 pub async fn handle_execute(
+    headers: axum::http::HeaderMap,
     State((_executor, tx, redis_client, queue_manager)): State<(
         Arc<CodeExecutor>,
         Arc<broadcast::Sender<ExecutionNotification>>,
@@ -30,18 +31,26 @@ pub async fn handle_execute(
     )>,
     Json(request): Json<ExecutionRequest>,
 ) -> AppResponse<SubmissionResponse> {
-    // --- 1. Quick Cache Check for Single, Simple Executions ---
-    // This provides an immediate response for frequently run, identical code snippets.
+    // 1. Extract Bearer Token from Headers
+    let billing_token = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+
+    // 2. Restore Caching Logic (Using Sha256 and hex::ToHex)
     let language = request.language.as_ref().unwrap_or(&"".to_string()).to_string();
     let version = request.version.as_ref().unwrap_or(&"".to_string()).to_string();
     let code = request.code.as_ref().unwrap_or(&"".to_string()).to_string();
     let stdin = request.stdin.clone();
-    // FIX: Read the default timeout from the environment instead of hardcoding it.
+    
     let default_timeout: u64 = env::var("DEFAULT_TIMEOUT")
         .unwrap_or_else(|_| "10".to_string())
         .parse()
         .unwrap_or(10);
     let timeout = request.timeout.unwrap_or(default_timeout);
+
     let cache_key = format!(
         "evalx:exec:{}:{}:{}:{}:{}",
         language,
@@ -50,9 +59,8 @@ pub async fn handle_execute(
         Sha256::digest(&code).encode_hex::<String>(),
         Sha256::digest(&stdin).encode_hex::<String>()
     );
-    // Using a block to scope the mutable redis_client
+
     if let Ok(Some(cached_result)) = redis_client.get_from_cache_async(&cache_key, Some(&language)).await {
-        debug!("Single execution cache hit for key: {}", cache_key);
         return AppResponse(Ok(SubmissionResponse {
             token: "cached".to_string(),
             status: SubmissionStatus::Completed,
@@ -60,7 +68,7 @@ pub async fn handle_execute(
         }));
     }
 
-    // --- 2. Unified Batch Queuing ---
+    // 3. Unified Batch Queuing
     let parent_token = Uuid::new_v4().to_string();
     let compile_task = CompileTask {
         parent_token: parent_token.clone(),
@@ -68,16 +76,12 @@ pub async fn handle_execute(
     };
     let task = ExecutionTask::CompileBatch(compile_task);
 
-    info!("Queuing single request as CompileBatch task: {}", parent_token);
-    match queue_manager
-        .add_task(task, 1, redis_client)
-        .await
-    {
+    // FIX: Pass the 4th argument (billing_token)
+    match queue_manager.add_task(task, 1, redis_client, billing_token).await {
         Ok(_) => {
             let _ = tx.send(ExecutionNotification {
                 id: parent_token.clone(),
                 status: "queued".to_string(),
-                
                 results: None,
             });
             AppResponse(Ok(SubmissionResponse {
@@ -90,8 +94,8 @@ pub async fn handle_execute(
     }
 }
 
-
 pub async fn handle_execute_batch(
+    headers: axum::http::HeaderMap,
     State((_executor, tx, redis_client, queue_manager)): State<(
         Arc<CodeExecutor>,
         Arc<broadcast::Sender<ExecutionNotification>>,
@@ -100,6 +104,14 @@ pub async fn handle_execute_batch(
     )>,
     Json(requests): Json<Vec<ExecutionRequest>>,
 ) -> AppResponse<SubmissionResponse> {
+    // Extract token for batch requests
+    let billing_token = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
+
     if requests.is_empty() {
         return AppResponse(Err(anyhow!("Batch request list cannot be empty")));
     }
@@ -111,13 +123,9 @@ pub async fn handle_execute_batch(
     };
     let task = ExecutionTask::CompileBatch(compile_task);
 
-    info!("Queuing batch request as CompileBatch task: {}", parent_token);
-    match queue_manager
-        .add_task(task, 1, redis_client)
-        .await
-    {
+    // FIX: Pass the 4th argument (billing_token)
+    match queue_manager.add_task(task, 1, redis_client, billing_token).await {
         Ok(_) => {
-            info!("Validated and queued batch task with ID: {}", parent_token);
             let _ = tx.send(ExecutionNotification {
                 id: parent_token.clone(),
                 status: "queued".to_string(),

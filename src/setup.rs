@@ -31,14 +31,13 @@ pub async fn initialize_executor(
     Arc<QueueManager>,
 )> {
     dotenv::dotenv().ok();
-
     let language_registry = Arc::new(LanguageRegistry::new()?);
 
-    // ADDED: Initialize SQS Client
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let sqs_client = SqsClient::new(&config);
-    // Check if URL is present at startup to fail early if missing
-    let _ = env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set in .env");
+
+    let sqs_url = env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set in .env");
+    let billing_queue_url = env::var("BILLING_QUEUE_URL").expect("BILLING_QUEUE_URL must be set in .env");
 
     let max_concurrent_tasks = env::var("MAX_CONCURRENT_SANDBOXES")
         .unwrap_or_else(|_| "50".to_string()) 
@@ -59,12 +58,12 @@ pub async fn initialize_executor(
     let (tx, _) = broadcast::channel::<ExecutionNotification>(1024);
     let tx = Arc::new(tx);
     
-    // Pass SQS Client to QueueManager
     let queue_manager = Arc::new(QueueManager::new(
         executor.clone(),
         redis_client.clone(),
         tx.clone(),
         sqs_client, 
+        billing_queue_url,
     ));
 
     Ok((executor, tx, queue_manager))
@@ -87,7 +86,8 @@ pub async fn start_workers(
     // 2. Initialize SQS Client for Worker Thread
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let sqs_client = SqsClient::new(&config);
-    let sqs_url = env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL not set");
+    let sqs_url = env::var("SQS_QUEUE_URL").expect("SQS_QUEUE_URL must be set in .env");
+    let billing_queue_url = env::var("BILLING_QUEUE_URL").expect("BILLING_QUEUE_URL must be set in .env");
 
     // 3. Determine Core for Workers (The Last Core)
     let core_ids = core_affinity::get_core_ids().unwrap_or_else(|| {
