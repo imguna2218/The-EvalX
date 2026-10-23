@@ -2,6 +2,8 @@
 
 This repository contains the local deployment instructions and API documentation for EvalX. Due to the strict system-level configurations and custom Linux-native chroot isolation required for the execution workers, the entire distributed engine is packaged into a standalone Docker environment for seamless local testing.
 
+Manually downloading and configuring the isolated chroot environments and distributed dependencies requires a complex, multi-step system setup. I eliminated that friction entirely—just pull our pre-configured Docker image and follow the steps below to initialize the cluster and start executing payloads immediately.
+
 ## Prerequisites
 
 * Docker engine installed and running.
